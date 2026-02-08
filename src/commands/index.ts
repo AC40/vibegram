@@ -1,0 +1,38 @@
+import type { Bot } from 'grammy';
+import type { BotContext } from '../bot.js';
+import { startCommand } from './start.js';
+import { newCommand } from './new.js';
+import { sessionsCommand } from './sessions.js';
+import { switchCommand } from './switch.js';
+import { deleteCommand } from './delete.js';
+import { renameCommand } from './rename.js';
+import { cdCommand } from './cd.js';
+import { clearCommand } from './clear.js';
+import { cancelCommand } from './cancel.js';
+import { statusCommand } from './status.js';
+import { querystatusCommand } from './querystatus.js';
+import { modeCommand } from './mode.js';
+import { verbosityCommand } from './verbosity.js';
+import { notificationsCommand } from './notifications.js';
+import { settingsCommand } from './settings.js';
+import { bothelpCommand } from './bothelp.js';
+
+export function registerCommands(bot: Bot<BotContext>): void {
+  bot.command('start', startCommand);
+  bot.command('new', newCommand);
+  bot.command('sessions', sessionsCommand);
+  bot.command('switch', switchCommand);
+  bot.command('delete', deleteCommand);
+  bot.command('rename', renameCommand);
+  bot.command('cd', cdCommand);
+  bot.command('clear', clearCommand);
+  bot.command('cancel', cancelCommand);
+  bot.command('status', statusCommand);
+  bot.command('querystatus', querystatusCommand);
+  bot.command('mode', modeCommand);
+  bot.command('verbosity', verbosityCommand);
+  bot.command('notifications', notificationsCommand);
+  bot.command('settings', settingsCommand);
+  bot.command('bothelp', bothelpCommand);
+  bot.command('help', bothelpCommand);
+}
