@@ -14,24 +14,30 @@ export async function newCommand(ctx: BotContext): Promise<void> {
   }
 
   const text = ctx.message?.text ?? '';
-  const name = text.replace(/^\/new\s*/, '').trim() || `session-${sessions.length + 1}`;
+  const rawName = text.replace(/^\/new\s*/, '').trim();
 
   const settings = sessionManager.getSettings(userId);
 
-  // If there's a path argument after the name, use it directly
-  const parts = name.split(/\s+/);
-  if (parts.length > 1) {
-    const sessionName = parts[0]!;
-    const path = parts.slice(1).join(' ');
-    const session = sessionManager.createSession(userId, sessionName, path);
-    await ctx.reply(`Created ${session.emoji} ${session.name}\nDirectory: ${path}`);
-    return;
+  // If there's a name with a path argument, use it directly
+  if (rawName) {
+    const parts = rawName.split(/\s+/);
+    if (parts.length > 1) {
+      const sessionName = parts[0]!;
+      const path = parts.slice(1).join(' ');
+      const session = sessionManager.createSession(userId, sessionName, path);
+      await ctx.reply(`Created ${session.emoji} ${session.name}\nDirectory: ${path}`);
+      return;
+    }
   }
 
   // Otherwise, open directory browser
-  setPendingNewSession(userId, name);
+  const pendingName = rawName || '';
+  setPendingNewSession(userId, pendingName);
   const { keyboard, resolvedPath } = browseDirectory(settings.defaultDirectory);
-  await ctx.reply(`📁 Select directory for "${name}"\n${resolvedPath}`, {
+  const prompt = pendingName
+    ? `📁 Select directory for "${pendingName}"\n${resolvedPath}`
+    : `📁 Select directory for new session\n${resolvedPath}`;
+  await ctx.reply(prompt, {
     reply_markup: keyboard,
   });
 }

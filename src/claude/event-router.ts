@@ -1,13 +1,48 @@
-import type { Api } from 'grammy';
+import { type Api, InputFile } from 'grammy';
+import { readFile, readdir, stat } from 'fs/promises';
+import { homedir } from 'os';
+import { join, basename } from 'path';
 import type { ClaudeEvent } from '../types/claude.js';
 import type { Session, UserSettings } from '../types/session.js';
 import { StreamingEditor } from '../telegram/streaming-editor.js';
 import { postfixEmoji } from '../telegram/renderer.js';
+import { buildPlanApprovalKeyboard } from '../telegram/keyboard-builder.js';
 import * as sessionManager from '../core/session-manager.js';
 import { getQueue } from '../core/message-queue.js';
 import { logger } from '../utils/logger.js';
 
 const streamingEditors = new Map<string, StreamingEditor>();
+const lastPlanFilePaths = new Map<string, string>();
+const pendingPlanApprovals = new Set<string>();
+const eventChains = new Map<string, Promise<void>>();
+
+const MAX_DETAIL_LENGTH = 80;
+
+function truncate(text: string, max: number = MAX_DETAIL_LENGTH): string {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function formatToolDetail(toolName: string, input: Record<string, unknown>): string | undefined {
+  switch (toolName) {
+    case 'Read':
+    case 'Write':
+    case 'Edit':
+      return typeof input['file_path'] === 'string' ? input['file_path'] : undefined;
+    case 'Bash':
+      return typeof input['command'] === 'string' ? truncate(input['command']) : undefined;
+    case 'Glob':
+    case 'Grep':
+      return typeof input['pattern'] === 'string' ? input['pattern'] : undefined;
+    case 'WebFetch':
+      return typeof input['url'] === 'string' ? truncate(input['url']) : undefined;
+    case 'WebSearch':
+      return typeof input['query'] === 'string' ? truncate(input['query']) : undefined;
+    case 'Task':
+      return typeof input['description'] === 'string' ? truncate(input['description']) : undefined;
+    default:
+      return undefined;
+  }
+}
 
 function getNotificationSetting(event: ClaudeEvent, settings: UserSettings): boolean {
   // Returns `disable_notification` value
@@ -25,7 +60,25 @@ function shouldShowMessage(session: Session, settings: UserSettings): boolean {
   return session.id === activeId;
 }
 
-export async function routeClaudeEvent(
+export function routeClaudeEvent(
+  api: Api,
+  chatId: number,
+  session: Session,
+  event: ClaudeEvent,
+): void {
+  const prev = eventChains.get(session.id) ?? Promise.resolve();
+  const next = prev.then(() => processEvent(api, chatId, session, event)).catch((error) => {
+    logger.error({ error, sessionId: session.id }, 'Event processing error');
+  });
+  eventChains.set(session.id, next);
+
+  // Clean up chain on terminal events to prevent memory leak
+  if (event.type === 'result' || event.type === 'error') {
+    next.then(() => eventChains.delete(session.id));
+  }
+}
+
+async function processEvent(
   api: Api,
   chatId: number,
   session: Session,
@@ -78,8 +131,23 @@ export async function routeClaudeEvent(
     }
 
     case 'tool_use': {
-      if (settings.verbosity !== 'minimal') {
-        const toolMsg = `🔧 ${event.toolName}`;
+      // Track Write events targeting the plans directory
+      if (event.toolName === 'Write' && typeof event.input['file_path'] === 'string') {
+        const filePath = event.input['file_path'];
+        if (filePath.includes('.claude/plans/')) {
+          lastPlanFilePaths.set(session.id, filePath);
+        }
+      }
+
+      // Intercept ExitPlanMode — flag for plan approval on result
+      if (event.toolName === 'ExitPlanMode') {
+        pendingPlanApprovals.add(session.id);
+        break;
+      }
+
+      if (settings.verbosity === 'verbose') {
+        const detail = formatToolDetail(event.toolName, event.input);
+        const toolMsg = detail ? `🔧 ${event.toolName}: ${detail}` : `🔧 ${event.toolName}`;
         await api.sendMessage(chatId, postfixEmoji(toolMsg, session.emoji), {
           disable_notification: true,
         });
@@ -105,6 +173,12 @@ export async function routeClaudeEvent(
       }
 
       sessionManager.updateSessionStatus(session.id, 'idle');
+
+      // Send plan approval document if ExitPlanMode was called
+      if (pendingPlanApprovals.has(session.id)) {
+        pendingPlanApprovals.delete(session.id);
+        await sendPlanApproval(api, chatId, session);
+      }
 
       // Process next queued message
       const queue = getQueue(session.id);
@@ -142,4 +216,72 @@ export async function routeClaudeEvent(
       }
       break;
   }
+}
+
+async function findPlanFile(sessionId: string): Promise<string | null> {
+  // Primary: use tracked path from Write event
+  const tracked = lastPlanFilePaths.get(sessionId);
+  if (tracked) {
+    try {
+      await stat(tracked);
+      return tracked;
+    } catch {
+      // File doesn't exist, try fallback
+    }
+  }
+
+  // Fallback: glob plans directory for most recently modified .md file
+  const plansDir = join(homedir(), '.claude', 'plans');
+  try {
+    const files = await readdir(plansDir);
+    const mdFiles = files.filter((f) => f.endsWith('.md'));
+    if (mdFiles.length === 0) return null;
+
+    const now = Date.now();
+    let bestPath: string | null = null;
+    let bestMtime = 0;
+
+    for (const file of mdFiles) {
+      const fullPath = join(plansDir, file);
+      const fileStat = await stat(fullPath);
+      const age = now - fileStat.mtimeMs;
+      if (age < 60_000 && fileStat.mtimeMs > bestMtime) {
+        bestMtime = fileStat.mtimeMs;
+        bestPath = fullPath;
+      }
+    }
+
+    return bestPath;
+  } catch {
+    return null;
+  }
+}
+
+async function sendPlanApproval(api: Api, chatId: number, session: Session): Promise<void> {
+  const keyboard = buildPlanApprovalKeyboard(session.id);
+  const planPath = await findPlanFile(session.id);
+
+  // Clean up tracked path
+  lastPlanFilePaths.delete(session.id);
+
+  if (planPath) {
+    try {
+      const content = await readFile(planPath, 'utf-8');
+      const filename = basename(planPath);
+      const caption = postfixEmoji('📋 Plan ready for review', session.emoji);
+
+      await api.sendDocument(chatId, new InputFile(Buffer.from(content), filename), {
+        caption,
+        reply_markup: keyboard,
+      });
+      return;
+    } catch (error) {
+      logger.warn({ error, planPath, sessionId: session.id }, 'Failed to read plan file');
+    }
+  }
+
+  // Fallback: no plan file found, send text with keyboard
+  await api.sendMessage(chatId, postfixEmoji('📋 Plan ready for review', session.emoji), {
+    reply_markup: keyboard,
+  });
 }

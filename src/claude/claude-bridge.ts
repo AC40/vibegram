@@ -14,6 +14,10 @@ export interface BridgeOptions {
 interface SessionState {
   process: ChildProcess | null;
   processing: boolean;
+  /** Accumulated text length from partial assistant messages, used to compute deltas. */
+  lastTextLength: number;
+  /** Text blocks that have already been finalized (text_done emitted), to prevent duplicates. */
+  finalizedTexts: Set<string>;
 }
 
 export class ClaudeBridge extends EventEmitter implements AIBackend {
@@ -23,7 +27,7 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
   private getOrCreateState(sessionId: string): SessionState {
     let state = this.sessions.get(sessionId);
     if (!state) {
-      state = { process: null, processing: false };
+      state = { process: null, processing: false, lastTextLength: 0, finalizedTexts: new Set() };
       this.sessions.set(sessionId, state);
     }
     return state;
@@ -63,6 +67,8 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
         args.push('--resume', options.resume);
       }
 
+      state.lastTextLength = 0;
+      state.finalizedTexts.clear();
       logger.debug({ sessionId, cwd: options.cwd, resume: !!options.resume }, 'Spawning claude CLI');
 
       const child = spawn('claude', args, {
@@ -139,34 +145,55 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
       }
 
       case 'assistant': {
+        const isPartial = msg['partial'] === true;
         const message = msg['message'] as { content?: Array<Record<string, unknown>> } | undefined;
         const content = message?.content;
         if (!Array.isArray(content)) break;
 
+        const state = this.sessions.get(sessionId);
+
         for (const block of content) {
           if (block['type'] === 'text' && typeof block['text'] === 'string') {
-            this.emit('event', sessionId, {
-              type: 'text_done',
-              fullText: block['text'],
-            } satisfies ClaudeEvent);
-          } else if (block['type'] === 'tool_use') {
+            const fullText = block['text'];
+
+            if (isPartial && state) {
+              // Compute the new delta from accumulated text
+              const delta = fullText.slice(state.lastTextLength);
+              state.lastTextLength = fullText.length;
+              if (delta) {
+                this.emit('event', sessionId, {
+                  type: 'text_delta',
+                  text: delta,
+                } satisfies ClaudeEvent);
+              }
+            } else {
+              // Final assistant message — skip if this text block was already finalized
+              if (state?.finalizedTexts.has(fullText)) continue;
+
+              // Emit any remaining delta, then text_done
+              if (state && fullText.length > state.lastTextLength) {
+                const remaining = fullText.slice(state.lastTextLength);
+                this.emit('event', sessionId, {
+                  type: 'text_delta',
+                  text: remaining,
+                } satisfies ClaudeEvent);
+              }
+              this.emit('event', sessionId, {
+                type: 'text_done',
+                fullText,
+              } satisfies ClaudeEvent);
+              if (state) {
+                state.finalizedTexts.add(fullText);
+                state.lastTextLength = 0;
+              }
+            }
+          } else if (block['type'] === 'tool_use' && !isPartial) {
             this.emit('event', sessionId, {
               type: 'tool_use',
               toolName: block['name'] as string,
               input: (block['input'] ?? {}) as Record<string, unknown>,
             } satisfies ClaudeEvent);
           }
-        }
-        break;
-      }
-
-      case 'content_block_delta': {
-        const delta = msg['delta'] as Record<string, unknown> | undefined;
-        if (delta && typeof delta['text'] === 'string') {
-          this.emit('event', sessionId, {
-            type: 'text_delta',
-            text: delta['text'],
-          } satisfies ClaudeEvent);
         }
         break;
       }

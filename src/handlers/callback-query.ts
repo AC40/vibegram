@@ -1,11 +1,13 @@
 import type { BotContext } from '../bot.js';
 import * as sessionManager from '../core/session-manager.js';
+import { getQueue } from '../core/message-queue.js';
 import { browseDirectory } from '../telegram/directory-browser.js';
 import { buildNotificationKeyboard, buildVerbosityKeyboard, buildVisibilityKeyboard, buildPermissionModeKeyboard, buildSettingsKeyboard } from '../telegram/keyboard-builder.js';
 import { postfixEmoji } from '../telegram/renderer.js';
 import type { ClaudeBridge } from '../claude/claude-bridge.js';
+import { resolvePath } from '../telegram/path-registry.js';
 import { logger } from '../utils/logger.js';
-import type { CrossSessionVisibility, NotificationMode, Verbosity } from '../types/session.js';
+import type { CrossSessionVisibility, NotificationMode, Session, Verbosity } from '../types/session.js';
 
 let claudeBridge: ClaudeBridge | null = null;
 let pendingNewSession: Map<number, string> = new Map(); // userId → sessionName
@@ -46,7 +48,7 @@ export async function handleCallbackQuery(ctx: BotContext): Promise<void> {
         await handleCd(ctx, userId, payload);
         break;
 
-      case 'select_dir':
+      case 'sel':
         await handleSelectDir(ctx, userId, payload);
         break;
 
@@ -68,6 +70,10 @@ export async function handleCallbackQuery(ctx: BotContext): Promise<void> {
 
       case 'settings':
         await handleSettingsMenu(ctx, userId, payload);
+        break;
+
+      case 'plan':
+        await handlePlanAction(ctx, userId, rest);
         break;
 
       case 'cancel_action':
@@ -120,18 +126,42 @@ async function handleConfirm(ctx: BotContext, userId: number, rest: string[]): P
   }
 }
 
-async function handleCd(ctx: BotContext, userId: number, path: string): Promise<void> {
+async function handleCd(ctx: BotContext, userId: number, idStr: string): Promise<void> {
+  const path = resolvePath(Number(idStr));
+  if (!path) {
+    await ctx.answerCallbackQuery({ text: 'Path expired. Try again.' });
+    return;
+  }
   const { keyboard, resolvedPath } = browseDirectory(path);
   await ctx.editMessageText(`📁 ${resolvedPath}`, { reply_markup: keyboard });
   await ctx.answerCallbackQuery();
 }
 
-async function handleSelectDir(ctx: BotContext, userId: number, path: string): Promise<void> {
+async function handleSelectDir(ctx: BotContext, userId: number, idStr: string): Promise<void> {
+  const path = resolvePath(Number(idStr));
+  if (!path) {
+    await ctx.answerCallbackQuery({ text: 'Path expired. Try again.' });
+    return;
+  }
+
   // Check if this is for a new session
   const pendingName = pendingNewSession.get(userId);
-  if (pendingName) {
+  if (pendingName !== undefined) {
     pendingNewSession.delete(userId);
-    const session = sessionManager.createSession(userId, pendingName, path);
+
+    let sessionName = pendingName;
+    if (!sessionName) {
+      const base = path.split('/').filter(Boolean).pop() ?? 'session';
+      const existing = sessionManager.getSessions(userId);
+      const taken = new Set(existing.map((s) => s.name));
+      sessionName = base;
+      let idx = 2;
+      while (taken.has(sessionName)) {
+        sessionName = `${base}-${idx++}`;
+      }
+    }
+
+    const session = sessionManager.createSession(userId, sessionName, path);
     await ctx.editMessageText(
       `Created ${session.emoji} ${session.name}\nDirectory: ${path}`
     );
@@ -210,4 +240,96 @@ async function handleSettingsMenu(ctx: BotContext, userId: number, section: stri
       break;
   }
   await ctx.answerCallbackQuery();
+}
+
+async function handlePlanAction(ctx: BotContext, userId: number, rest: string[]): Promise<void> {
+  const [action, sessionId] = rest;
+  if (!action || !sessionId) return;
+
+  const session = sessionManager.getSessions(userId).find((s) => s.id === sessionId);
+  if (!session) {
+    await ctx.answerCallbackQuery({ text: 'Session not found.' });
+    return;
+  }
+
+  switch (action) {
+    case 'bypass': {
+      sessionManager.updateSessionPermissionMode(session.id, 'dontAsk');
+      await updatePlanCaption(ctx, `✅ Plan approved (bypass mode) ${session.emoji}`);
+      await ctx.answerCallbackQuery({ text: 'Plan approved — bypass mode' });
+      await resumeWithMessage(session, 'Plan approved. Proceed.');
+      break;
+    }
+    case 'accept': {
+      sessionManager.updateSessionPermissionMode(session.id, 'acceptEdits');
+      await updatePlanCaption(ctx, `✅ Plan approved (accept edits) ${session.emoji}`);
+      await ctx.answerCallbackQuery({ text: 'Plan approved — accept edits' });
+      await resumeWithMessage(session, 'Plan approved. Proceed.');
+      break;
+    }
+    case 'changes': {
+      await updatePlanCaption(ctx, `✏️ Send your feedback as a message ${session.emoji}`);
+      await ctx.answerCallbackQuery({ text: 'Type your feedback' });
+      // User types feedback normally; it resumes via --resume in the text handler
+      break;
+    }
+    case 'abort': {
+      await updatePlanCaption(ctx, `❌ Plan rejected ${session.emoji}`);
+      await ctx.answerCallbackQuery({ text: 'Plan aborted' });
+      await resumeWithMessage(session, 'Plan rejected. Do not implement.');
+      break;
+    }
+    default:
+      logger.warn({ action }, 'Unknown plan action');
+  }
+}
+
+async function updatePlanCaption(ctx: BotContext, text: string): Promise<void> {
+  try {
+    await ctx.editMessageCaption({ caption: text });
+  } catch {
+    // Message might be a text message (fallback case), not a document
+    try {
+      await ctx.editMessageText(text);
+    } catch (error) {
+      logger.warn({ error }, 'Failed to update plan message');
+    }
+  }
+}
+
+async function resumeWithMessage(session: Session, message: string): Promise<void> {
+  if (!claudeBridge) {
+    logger.error({ sessionId: session.id }, 'Cannot resume: bridge not initialized');
+    return;
+  }
+
+  const queue = getQueue(session.id);
+
+  if (queue.isProcessing) {
+    queue.enqueue({ text: message, timestamp: Date.now() });
+    return;
+  }
+
+  queue.setProcessing(true);
+  sessionManager.updateSessionStatus(session.id, 'processing');
+
+  // Set up handler for queued follow-ups
+  queue.setHandler(async (msg) => {
+    await resumeWithMessage(
+      sessionManager.getSessions(session.userId).find((s) => s.id === session.id) ?? session,
+      msg.text,
+    );
+  });
+
+  try {
+    await claudeBridge.sendMessageWithOptions(session.id, message, {
+      cwd: session.cwd,
+      permissionMode: session.permissionMode,
+      resume: session.claudeSessionId ?? undefined,
+    });
+  } catch (error) {
+    logger.error({ error, sessionId: session.id }, 'Failed to resume session with plan action');
+    queue.setProcessing(false);
+    sessionManager.updateSessionStatus(session.id, 'idle');
+  }
 }

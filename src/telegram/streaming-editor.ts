@@ -78,12 +78,20 @@ export class StreamingEditor {
       this.editTimer = null;
     }
 
-    const displayText = postfixEmoji(this.buffer, this.emoji);
     if (this.messageId) {
+      const rendered = postfixEmoji(renderMarkdown(this.buffer), this.emoji);
       try {
-        await this.api.editMessageText(this.chatId, this.messageId, displayText);
+        await this.api.editMessageText(this.chatId, this.messageId, rendered, {
+          parse_mode: 'MarkdownV2',
+        });
       } catch {
-        // Best effort
+        // Fallback: plain text without parse_mode
+        const plain = postfixEmoji(this.buffer, this.emoji);
+        try {
+          await this.api.editMessageText(this.chatId, this.messageId, plain);
+        } catch {
+          // Best effort
+        }
       }
     }
   }
@@ -99,20 +107,35 @@ export class StreamingEditor {
 
     if (!this.buffer) return;
 
-    const displayText = postfixEmoji(this.buffer, this.emoji);
+    const rendered = postfixEmoji(renderMarkdown(this.buffer), this.emoji);
 
     try {
       if (!this.messageId) {
-        await this.api.sendMessage(this.chatId, displayText, {
+        await this.api.sendMessage(this.chatId, rendered, {
+          parse_mode: 'MarkdownV2',
           disable_notification: disableNotification,
         });
       } else {
-        await this.api.editMessageText(this.chatId, this.messageId, displayText);
+        await this.api.editMessageText(this.chatId, this.messageId, rendered, {
+          parse_mode: 'MarkdownV2',
+        });
       }
     } catch (error: unknown) {
-      const msg = error instanceof Error ? error.message : String(error);
-      if (!msg.includes('message is not modified')) {
-        logger.warn({ error }, 'Failed to finalize streaming message');
+      // Fallback: retry as plain text (malformed Markdown, etc.)
+      const plain = postfixEmoji(this.buffer, this.emoji);
+      try {
+        if (!this.messageId) {
+          await this.api.sendMessage(this.chatId, plain, {
+            disable_notification: disableNotification,
+          });
+        } else {
+          await this.api.editMessageText(this.chatId, this.messageId, plain);
+        }
+      } catch (fallbackError: unknown) {
+        const msg = fallbackError instanceof Error ? fallbackError.message : String(fallbackError);
+        if (!msg.includes('message is not modified')) {
+          logger.warn({ error: fallbackError }, 'Failed to finalize streaming message');
+        }
       }
     }
   }
