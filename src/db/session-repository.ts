@@ -75,6 +75,12 @@ export function clearClaudeSession(id: string): void {
   db.prepare("UPDATE sessions SET claude_session_id = NULL, status = 'idle', last_active_at = datetime('now') WHERE id = ?").run(id);
 }
 
+export function getAllUserIds(): number[] {
+  const db = getDb();
+  const rows = db.prepare('SELECT DISTINCT user_id FROM sessions').all() as { user_id: number }[];
+  return rows.map(r => r.user_id);
+}
+
 export function getSessionByEmoji(userId: number, emoji: string): Session | null {
   const db = getDb();
   const row = db.prepare('SELECT * FROM sessions WHERE user_id = ? AND emoji = ?').get(userId, emoji) as Record<string, unknown> | undefined;

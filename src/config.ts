@@ -19,6 +19,13 @@ const configSchema = z.object({
   DEFAULT_WORKING_DIR: z.string().default(process.env['HOME'] ?? '/tmp'),
   SQLITE_PATH: z.string().default('./data/vibegram.db'),
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error', 'fatal']).default('info'),
+  // Server config (for webhook mode, matching VibeTunnel's port 4020)
+  PORT: z.string().default('4020').transform((val) => parseInt(val, 10)),
+  BIND: z.string().default('0.0.0.0'),
+  WEBHOOK_URL: z.string().optional(),
+  WEBHOOK_PATH: z.string().default('/webhook'),
+  // Use polling or webhook mode
+  USE_WEBHOOK: z.string().default('false').transform((val) => val === 'true'),
 });
 
 const parsed = configSchema.safeParse(process.env);
