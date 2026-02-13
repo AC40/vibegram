@@ -16,6 +16,8 @@ import { verbosityCommand } from './verbosity.js';
 import { notificationsCommand } from './notifications.js';
 import { settingsCommand } from './settings.js';
 import { bothelpCommand } from './bothelp.js';
+import { historyCommand } from './history.js';
+import { searchCommand } from './search.js';
 
 export function registerCommands(bot: Bot<BotContext>): void {
   bot.command('start', startCommand);
@@ -35,4 +37,6 @@ export function registerCommands(bot: Bot<BotContext>): void {
   bot.command('settings', settingsCommand);
   bot.command('bothelp', bothelpCommand);
   bot.command('help', bothelpCommand);
+  bot.command('history', historyCommand);
+  bot.command('search', searchCommand);
 }

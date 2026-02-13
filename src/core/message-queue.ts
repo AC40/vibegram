@@ -13,6 +13,7 @@ class SessionQueue {
   private readonly queue: QueuedMessage[] = [];
   private processing = false;
   private handler: MessageHandler | null = null;
+  private currentTurnId: number | null = null;
 
   setHandler(handler: MessageHandler): void {
     this.handler = handler;
@@ -24,6 +25,14 @@ class SessionQueue {
 
   get depth(): number {
     return this.queue.length;
+  }
+
+  setCurrentTurnId(id: number | null): void {
+    this.currentTurnId = id;
+  }
+
+  getCurrentTurnId(): number | null {
+    return this.currentTurnId;
   }
 
   enqueue(message: QueuedMessage): number {

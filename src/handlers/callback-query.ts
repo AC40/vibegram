@@ -2,12 +2,14 @@ import type { BotContext } from '../bot.js';
 import * as sessionManager from '../core/session-manager.js';
 import { getQueue } from '../core/message-queue.js';
 import { browseDirectory } from '../telegram/directory-browser.js';
-import { buildNotificationKeyboard, buildVerbosityKeyboard, buildVisibilityKeyboard, buildPermissionModeKeyboard, buildSettingsKeyboard } from '../telegram/keyboard-builder.js';
+import { buildNotificationKeyboard, buildVerbosityKeyboard, buildVisibilityKeyboard, buildPermissionModeKeyboard, buildSettingsKeyboard, buildHistoryPaginationKeyboard } from '../telegram/keyboard-builder.js';
 import { postfixEmoji } from '../telegram/renderer.js';
 import type { ClaudeBridge } from '../claude/claude-bridge.js';
 import { resolvePath } from '../telegram/path-registry.js';
 import { logger } from '../utils/logger.js';
 import type { CrossSessionVisibility, NotificationMode, Session, Verbosity } from '../types/session.js';
+import * as historyRepo from '../db/history-repository.js';
+import { formatHistoryPage, ITEMS_PER_PAGE } from '../commands/history.js';
 
 let claudeBridge: ClaudeBridge | null = null;
 let pendingNewSession: Map<number, string> = new Map(); // userId → sessionName
@@ -74,6 +76,10 @@ export async function handleCallbackQuery(ctx: BotContext): Promise<void> {
 
       case 'plan':
         await handlePlanAction(ctx, userId, rest);
+        break;
+
+      case 'history':
+        await handleHistoryPagination(ctx, userId, rest);
         break;
 
       case 'cancel_action':
@@ -295,6 +301,30 @@ async function updatePlanCaption(ctx: BotContext, text: string): Promise<void> {
       logger.warn({ error }, 'Failed to update plan message');
     }
   }
+}
+
+async function handleHistoryPagination(ctx: BotContext, userId: number, rest: string[]): Promise<void> {
+  const [sessionId, offsetStr] = rest;
+  if (!sessionId || offsetStr === undefined) return;
+
+  const session = sessionManager.getSessions(userId).find((s) => s.id === sessionId);
+  if (!session) {
+    await ctx.answerCallbackQuery({ text: 'Session not found.' });
+    return;
+  }
+
+  const offset = parseInt(offsetStr, 10);
+  const total = historyRepo.getHistoryCount(session.id);
+  const turns = historyRepo.getHistory(session.id, ITEMS_PER_PAGE, offset);
+  const page = Math.floor(offset / ITEMS_PER_PAGE) + 1;
+  const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
+
+  const formatted = formatHistoryPage(turns, page, totalPages);
+
+  await ctx.editMessageText(`${formatted} ${session.emoji}`, {
+    reply_markup: buildHistoryPaginationKeyboard(session.id, offset, total, ITEMS_PER_PAGE),
+  });
+  await ctx.answerCallbackQuery();
 }
 
 async function resumeWithMessage(session: Session, message: string): Promise<void> {

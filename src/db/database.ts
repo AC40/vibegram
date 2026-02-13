@@ -47,11 +47,68 @@ function runMigrations(db: Database.Database): void {
       verbosity TEXT NOT NULL DEFAULT 'normal',
       notification_mode TEXT NOT NULL DEFAULT 'smart',
       cross_session_visibility TEXT NOT NULL DEFAULT 'show_all',
-      default_permission_mode TEXT NOT NULL DEFAULT 'default'
+      default_permission_mode TEXT NOT NULL DEFAULT 'default',
+      file_sharing_mode TEXT NOT NULL DEFAULT 'auto'
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+
+    -- Conversation history
+    CREATE TABLE IF NOT EXISTS conversation_turns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      turn_type TEXT NOT NULL CHECK (turn_type IN ('user', 'assistant')),
+      content TEXT NOT NULL,
+      tokens_used INTEGER,
+      cost_usd REAL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_conversation_turns_session ON conversation_turns(session_id);
+    CREATE INDEX IF NOT EXISTS idx_conversation_turns_created ON conversation_turns(created_at);
+
+    -- Tool invocations log
+    CREATE TABLE IF NOT EXISTS tool_invocations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL,
+      turn_id INTEGER,
+      tool_name TEXT NOT NULL,
+      input_json TEXT NOT NULL,
+      file_path TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+      FOREIGN KEY (turn_id) REFERENCES conversation_turns(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tool_invocations_session ON tool_invocations(session_id);
   `);
+
+  // Create FTS5 virtual table for full-text search (separate exec due to virtual table syntax)
+  try {
+    db.exec(`
+      CREATE VIRTUAL TABLE IF NOT EXISTS conversation_turns_fts USING fts5(
+        content,
+        content='conversation_turns',
+        content_rowid='id'
+      );
+    `);
+
+    // Triggers to keep FTS synchronized
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS conversation_turns_ai AFTER INSERT ON conversation_turns BEGIN
+        INSERT INTO conversation_turns_fts(rowid, content) VALUES (new.id, new.content);
+      END;
+    `);
+
+    db.exec(`
+      CREATE TRIGGER IF NOT EXISTS conversation_turns_ad AFTER DELETE ON conversation_turns BEGIN
+        INSERT INTO conversation_turns_fts(conversation_turns_fts, rowid, content) VALUES('delete', old.id, old.content);
+      END;
+    `);
+  } catch {
+    // FTS tables/triggers may already exist
+  }
 
   logger.debug('Database migrations complete');
 }

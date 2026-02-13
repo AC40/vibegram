@@ -10,11 +10,16 @@ import { buildPlanApprovalKeyboard } from '../telegram/keyboard-builder.js';
 import * as sessionManager from '../core/session-manager.js';
 import { getQueue } from '../core/message-queue.js';
 import { logger } from '../utils/logger.js';
+import * as historyRepo from '../db/history-repository.js';
+import { sendFileToTelegram, type FileOperation } from '../services/file-sender.js';
 
 const streamingEditors = new Map<string, StreamingEditor>();
 const lastPlanFilePaths = new Map<string, string>();
 const pendingPlanApprovals = new Set<string>();
 const eventChains = new Map<string, Promise<void>>();
+const currentAssistantTurns = new Map<string, number>();
+const pendingFileOps = new Map<string, FileOperation[]>();
+const assistantTextBuffers = new Map<string, string>();
 
 const MAX_DETAIL_LENGTH = 80;
 
@@ -117,6 +122,10 @@ async function processEvent(
         streamingEditors.set(session.id, editor);
       }
       await editor.appendText(event.text);
+
+      // Buffer text for history persistence
+      const buffer = assistantTextBuffers.get(session.id) ?? '';
+      assistantTextBuffers.set(session.id, buffer + event.text);
       break;
     }
 
@@ -126,6 +135,14 @@ async function processEvent(
       if (editor) {
         await editor.finalize(disableNotification);
         streamingEditors.delete(session.id);
+      }
+
+      // Persist assistant turn to history
+      const fullText = assistantTextBuffers.get(session.id) ?? event.fullText;
+      assistantTextBuffers.delete(session.id);
+      if (fullText) {
+        const turn = historyRepo.addAssistantTurn(session.id, fullText);
+        currentAssistantTurns.set(session.id, turn.id);
       }
       break;
     }
@@ -138,6 +155,27 @@ async function processEvent(
           lastPlanFilePaths.set(session.id, filePath);
         }
       }
+
+      // Track Write/Edit operations for file sharing
+      if ((event.toolName === 'Write' || event.toolName === 'Edit') && typeof event.input['file_path'] === 'string') {
+        const filePath = event.input['file_path'];
+        // Don't track plan files for file sharing
+        if (!filePath.includes('.claude/plans/')) {
+          const ops = pendingFileOps.get(session.id) ?? [];
+          ops.push({
+            type: event.toolName.toLowerCase() as 'write' | 'edit',
+            filePath,
+          });
+          pendingFileOps.set(session.id, ops);
+        }
+      }
+
+      // Persist tool invocation to history
+      const turnId = currentAssistantTurns.get(session.id) ?? null;
+      const filePath = ['Write', 'Edit'].includes(event.toolName)
+        ? (event.input['file_path'] as string | undefined)
+        : undefined;
+      historyRepo.addToolInvocation(session.id, turnId, event.toolName, event.input, filePath);
 
       // Intercept ExitPlanMode — flag for plan approval on result
       if (event.toolName === 'ExitPlanMode') {
@@ -163,6 +201,16 @@ async function processEvent(
         streamingEditors.delete(session.id);
       }
 
+      // Update turn cost in history
+      const turnId = currentAssistantTurns.get(session.id);
+      if (turnId) {
+        historyRepo.updateTurnCost(turnId, event.costUsd);
+        currentAssistantTurns.delete(session.id);
+      }
+
+      // Clear text buffer
+      assistantTextBuffers.delete(session.id);
+
       if (settings.verbosity !== 'minimal') {
         const costStr = `$${event.costUsd.toFixed(4)}`;
         const durationStr = `${(event.durationMs / 1000).toFixed(1)}s`;
@@ -174,6 +222,21 @@ async function processEvent(
 
       sessionManager.updateSessionStatus(session.id, 'idle');
 
+      // Send file operations to Telegram if file sharing is enabled
+      if (settings.fileSharingMode !== 'off') {
+        const fileOps = pendingFileOps.get(session.id) ?? [];
+        pendingFileOps.delete(session.id);
+        for (const op of fileOps) {
+          try {
+            await sendFileToTelegram(api, chatId, op, session.emoji);
+          } catch (error) {
+            logger.warn({ error, op }, 'Failed to send file to Telegram');
+          }
+        }
+      } else {
+        pendingFileOps.delete(session.id);
+      }
+
       // Send plan approval document if ExitPlanMode was called
       if (pendingPlanApprovals.has(session.id)) {
         pendingPlanApprovals.delete(session.id);
@@ -183,6 +246,7 @@ async function processEvent(
       // Process next queued message
       const queue = getQueue(session.id);
       queue.setProcessing(false);
+      queue.setCurrentTurnId(null);
       await queue.processNext();
       break;
     }

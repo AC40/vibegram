@@ -16,6 +16,7 @@ export interface Session {
 export type Verbosity = 'minimal' | 'normal' | 'verbose';
 export type NotificationMode = 'smart' | 'all' | 'none';
 export type CrossSessionVisibility = 'show_all' | 'active_only';
+export type FileSharingMode = 'auto' | 'ask' | 'off';
 
 export interface UserSettings {
   readonly userId: number;
@@ -24,6 +25,7 @@ export interface UserSettings {
   notificationMode: NotificationMode;
   crossSessionVisibility: CrossSessionVisibility;
   defaultPermissionMode: string;
+  fileSharingMode: FileSharingMode;
 }
 
 export interface BufferedMessage {

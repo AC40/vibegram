@@ -108,3 +108,23 @@ export function buildPlanApprovalKeyboard(sessionId: string): InlineKeyboard {
     .text('✏️ Request Changes', `plan:changes:${sessionId}`)
     .text('❌ Abort', `plan:abort:${sessionId}`);
 }
+
+export function buildHistoryPaginationKeyboard(
+  sessionId: string,
+  offset: number,
+  total: number,
+  pageSize: number
+): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  const hasNext = offset + pageSize < total;
+  const hasPrev = offset > 0;
+
+  if (hasPrev) {
+    keyboard.text('⬅️ Prev', `history:${sessionId}:${offset - pageSize}`);
+  }
+  if (hasNext) {
+    keyboard.text('Next ➡️', `history:${sessionId}:${offset + pageSize}`);
+  }
+
+  return keyboard;
+}

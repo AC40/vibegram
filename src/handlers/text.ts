@@ -3,6 +3,7 @@ import * as sessionManager from '../core/session-manager.js';
 import { getQueue } from '../core/message-queue.js';
 import type { ClaudeBridge } from '../claude/claude-bridge.js';
 import { logger } from '../utils/logger.js';
+import * as historyRepo from '../db/history-repository.js';
 
 let claudeBridge: ClaudeBridge | null = null;
 
@@ -53,6 +54,10 @@ async function sendToClaudeBridge(
   });
 
   try {
+    // Persist user message to history
+    const userTurn = historyRepo.addUserTurn(session.id, text);
+    queue.setCurrentTurnId(userTurn.id);
+
     const options = {
       cwd: session.cwd,
       permissionMode: session.permissionMode,

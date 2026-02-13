@@ -1,6 +1,6 @@
 import { getDb } from './database.js';
 import { config } from '../config.js';
-import type { CrossSessionVisibility, NotificationMode, UserSettings, Verbosity } from '../types/session.js';
+import type { CrossSessionVisibility, FileSharingMode, NotificationMode, UserSettings, Verbosity } from '../types/session.js';
 
 function rowToSettings(row: Record<string, unknown>): UserSettings {
   return {
@@ -10,6 +10,7 @@ function rowToSettings(row: Record<string, unknown>): UserSettings {
     notificationMode: row['notification_mode'] as NotificationMode,
     crossSessionVisibility: row['cross_session_visibility'] as CrossSessionVisibility,
     defaultPermissionMode: row['default_permission_mode'] as string,
+    fileSharingMode: (row['file_sharing_mode'] as FileSharingMode) ?? 'auto',
   };
 }
 
@@ -28,7 +29,7 @@ export function getOrCreateSettings(userId: number): UserSettings {
 
 export function updateSettings(
   userId: number,
-  updates: Partial<Pick<UserSettings, 'defaultDirectory' | 'verbosity' | 'notificationMode' | 'crossSessionVisibility' | 'defaultPermissionMode'>>
+  updates: Partial<Pick<UserSettings, 'defaultDirectory' | 'verbosity' | 'notificationMode' | 'crossSessionVisibility' | 'defaultPermissionMode' | 'fileSharingMode'>>
 ): void {
   const db = getDb();
   const fields: string[] = [];
@@ -39,6 +40,7 @@ export function updateSettings(
   if (updates.notificationMode !== undefined) { fields.push('notification_mode = ?'); values.push(updates.notificationMode); }
   if (updates.crossSessionVisibility !== undefined) { fields.push('cross_session_visibility = ?'); values.push(updates.crossSessionVisibility); }
   if (updates.defaultPermissionMode !== undefined) { fields.push('default_permission_mode = ?'); values.push(updates.defaultPermissionMode); }
+  if (updates.fileSharingMode !== undefined) { fields.push('file_sharing_mode = ?'); values.push(updates.fileSharingMode); }
 
   if (fields.length === 0) return;
   values.push(userId);
