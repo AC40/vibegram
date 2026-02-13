@@ -18,11 +18,10 @@ interface SessionState {
   lastTextLength: number;
   /** Text blocks that have already been finalized (text_done emitted), to prevent duplicates. */
   finalizedTexts: Set<string>;
-  /** Timeout handle for force-killing stuck processes */
-  timeoutHandle: ReturnType<typeof setTimeout> | null;
 }
 
-const PROCESS_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max for any Claude command
+// NOTE: No process timeout - Claude sessions can run as long as needed
+// The previous 5-minute timeout was killing legitimate long-running sessions
 
 export class ClaudeBridge extends EventEmitter implements AIBackend {
   readonly name = 'claude';
@@ -31,31 +30,10 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
   private getOrCreateState(sessionId: string): SessionState {
     let state = this.sessions.get(sessionId);
     if (!state) {
-      state = { process: null, processing: false, lastTextLength: 0, finalizedTexts: new Set(), timeoutHandle: null };
+      state = { process: null, processing: false, lastTextLength: 0, finalizedTexts: new Set() };
       this.sessions.set(sessionId, state);
     }
     return state;
-  }
-
-  private clearTimeout(state: SessionState): void {
-    if (state.timeoutHandle) {
-      clearTimeout(state.timeoutHandle);
-      state.timeoutHandle = null;
-    }
-  }
-
-  private setProcessTimeout(sessionId: string, state: SessionState, child: ChildProcess): void {
-    this.clearTimeout(state);
-    state.timeoutHandle = setTimeout(() => {
-      logger.warn({ sessionId, pid: child.pid }, 'Claude process timed out, force killing');
-      // Try SIGTERM first, then SIGKILL if needed
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        if (!child.killed) {
-          child.kill('SIGKILL');
-        }
-      }, 5000);
-    }, PROCESS_TIMEOUT_MS);
   }
 
   async startSession(_options: { cwd: string; permissionMode: string }): Promise<string> {
@@ -121,12 +99,10 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
         stderrChunks += chunk.toString();
       });
 
-      // Set timeout to force-kill stuck processes
-      this.setProcessTimeout(sessionId, state, child);
+      // NOTE: No process timeout - sessions can run indefinitely
 
       await new Promise<void>((resolve) => {
         child.on('close', (code, signal) => {
-          this.clearTimeout(state);
           state.process = null;
           state.processing = false;
 
@@ -151,7 +127,6 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
         });
 
         child.on('error', (error) => {
-          this.clearTimeout(state);
           state.process = null;
           state.processing = false;
           logger.error({ sessionId, error: error.message }, 'Failed to spawn claude CLI');
@@ -264,8 +239,6 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
   async abort(sessionId: string): Promise<void> {
     const state = this.sessions.get(sessionId);
     if (!state?.process) return;
-
-    this.clearTimeout(state);
 
     // Try graceful shutdown first, then force kill
     const child = state.process;
