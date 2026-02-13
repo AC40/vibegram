@@ -1,6 +1,10 @@
 # Vibegram
 
-A Telegram bot that turns your chat into a full-featured [Claude Code](https://docs.anthropic.com/en/docs/claude-code) client. Manage multiple concurrent coding sessions, stream responses in real time, and work with files, voice, and images -- all from Telegram.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-brightgreen)](https://nodejs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
+
+A Telegram bot that turns your chat into a full-featured [Claude Code](https://docs.anthropic.com/en/docs/claude-code) client. Manage multiple concurrent coding sessions, stream responses in real time, and work with files, voice, and images — all from Telegram.
 
 ## Features
 
@@ -123,6 +127,10 @@ src/
 - [tsup](https://tsup.egoist.dev) -- TypeScript bundler
 - [Deepgram SDK](https://developers.deepgram.com) -- Voice-to-text transcription
 
+## Contributing
+
+Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md) and [Code of Conduct](CODE_OF_CONDUCT.md) before submitting a pull request.
+
 ## License
 
-Private -- all rights reserved.
+[MIT](LICENSE) — see the [LICENSE](LICENSE) file for details.

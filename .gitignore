@@ -4,3 +4,6 @@ data/
 .env
 *.db
 *.db-journal
+
+# Test coverage
+coverage/
