@@ -1,77 +1,93 @@
-import { type Api, InputFile } from 'grammy';
-import { readFile, stat } from 'fs/promises';
-import { basename, extname } from 'path';
-import { generateCodePreview, isCodeFile } from './code-preview.js';
+import { type Api } from 'grammy';
+import { basename } from 'path';
 import { postfixEmoji } from '../telegram/renderer.js';
-import { logger } from '../utils/logger.js';
-
-const MAX_PREVIEW_SIZE = 100 * 1024; // 100KB - files larger than this skip preview
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB Telegram limit
 
 export interface FileOperation {
   type: 'write' | 'edit';
   filePath: string;
+  insertions: number;
+  deletions: number;
 }
 
-export async function sendFileToTelegram(
+/**
+ * Calculate line stats for a Write operation (all lines are insertions)
+ */
+export function calcWriteStats(content: string): { insertions: number; deletions: number } {
+  const lines = content.split('\n').length;
+  return { insertions: lines, deletions: 0 };
+}
+
+/**
+ * Calculate line stats for an Edit operation
+ */
+export function calcEditStats(oldString: string, newString: string): { insertions: number; deletions: number } {
+  const oldLines = oldString.split('\n').length;
+  const newLines = newString.split('\n').length;
+  return {
+    insertions: Math.max(0, newLines - oldLines) + Math.min(oldLines, newLines),
+    deletions: oldLines,
+  };
+}
+
+/**
+ * Aggregate file operations - combine multiple edits to the same file
+ */
+export function aggregateFileOps(ops: FileOperation[]): FileOperation[] {
+  const byPath = new Map<string, FileOperation>();
+
+  for (const op of ops) {
+    const existing = byPath.get(op.filePath);
+    if (existing) {
+      existing.insertions += op.insertions;
+      existing.deletions += op.deletions;
+      // If any op is a write, mark as write
+      if (op.type === 'write') existing.type = 'write';
+    } else {
+      byPath.set(op.filePath, { ...op });
+    }
+  }
+
+  return Array.from(byPath.values());
+}
+
+/**
+ * Format a single file's stats like git diff --stat
+ */
+function formatFileStat(op: FileOperation): string {
+  const filename = basename(op.filePath);
+  const plus = op.insertions > 0 ? `+${op.insertions}` : '';
+  const minus = op.deletions > 0 ? `-${op.deletions}` : '';
+  const stats = [plus, minus].filter(Boolean).join(' ');
+  return `  ${filename} (${stats})`;
+}
+
+/**
+ * Send a summary of all file changes to Telegram
+ */
+export async function sendChangeSummary(
   api: Api,
   chatId: number,
-  operation: FileOperation,
+  ops: FileOperation[],
   sessionEmoji: string
 ): Promise<void> {
-  const { filePath, type } = operation;
+  if (ops.length === 0) return;
 
-  try {
-    const fileStat = await stat(filePath);
+  const aggregated = aggregateFileOps(ops);
+  const totalInsertions = aggregated.reduce((sum, op) => sum + op.insertions, 0);
+  const totalDeletions = aggregated.reduce((sum, op) => sum + op.deletions, 0);
 
-    if (fileStat.size > MAX_FILE_SIZE) {
-      await api.sendMessage(
-        chatId,
-        postfixEmoji(`📁 File too large to send: ${filePath} (${formatSize(fileStat.size)})`, sessionEmoji)
-      );
-      return;
-    }
+  const fileCount = aggregated.length;
+  const fileWord = fileCount === 1 ? 'file' : 'files';
 
-    const content = await readFile(filePath);
-    const ext = extname(filePath).toLowerCase();
-    const filename = basename(filePath);
-    const actionVerb = type === 'write' ? 'Created' : 'Updated';
+  const lines = [
+    `📝 ${fileCount} ${fileWord} changed`,
+    '',
+    ...aggregated.map(formatFileStat),
+    '',
+    `  +${totalInsertions} -${totalDeletions}`,
+  ];
 
-    // For code files under the preview size limit, generate syntax-highlighted preview
-    if (isCodeFile(ext) && fileStat.size < MAX_PREVIEW_SIZE) {
-      const preview = await generateCodePreview(content.toString('utf-8'), ext, filename);
-
-      if (preview) {
-        // Send preview image
-        await api.sendPhoto(chatId, new InputFile(preview, `${filename}.png`), {
-          caption: postfixEmoji(`📄 ${actionVerb}: ${filePath}`, sessionEmoji),
-        });
-
-        // Also send as document for copying
-        await api.sendDocument(chatId, new InputFile(content, filename), {
-          caption: postfixEmoji('📎 Source file', sessionEmoji),
-        });
-        return;
-      }
-    }
-
-    // Fallback: send as document only
-    await api.sendDocument(chatId, new InputFile(content, filename), {
-      caption: postfixEmoji(`📁 ${actionVerb}: ${filePath}`, sessionEmoji),
-    });
-  } catch (error) {
-    // File might not exist (e.g., deleted after being created)
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      logger.debug({ filePath }, 'File no longer exists, skipping send');
-      return;
-    }
-    logger.error({ error, filePath }, 'Failed to send file to Telegram');
-    throw error;
-  }
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  await api.sendMessage(chatId, postfixEmoji(lines.join('\n'), sessionEmoji), {
+    disable_notification: true,
+  });
 }

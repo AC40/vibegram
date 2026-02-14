@@ -11,7 +11,7 @@ import * as sessionManager from '../core/session-manager.js';
 import { getQueue } from '../core/message-queue.js';
 import { logger } from '../utils/logger.js';
 import * as historyRepo from '../db/history-repository.js';
-import { sendFileToTelegram, type FileOperation } from '../services/file-sender.js';
+import { sendChangeSummary, calcWriteStats, calcEditStats, type FileOperation } from '../services/file-sender.js';
 
 const streamingEditors = new Map<string, StreamingEditor>();
 const lastPlanFilePaths = new Map<string, string>();
@@ -156,16 +156,21 @@ async function processEvent(
         }
       }
 
-      // Track Write/Edit operations for file sharing
+      // Track Write/Edit operations for file change summary
       if ((event.toolName === 'Write' || event.toolName === 'Edit') && typeof event.input['file_path'] === 'string') {
         const filePath = event.input['file_path'];
-        // Don't track plan files for file sharing
+        // Don't track plan files
         if (!filePath.includes('.claude/plans/')) {
           const ops = pendingFileOps.get(session.id) ?? [];
-          ops.push({
-            type: event.toolName.toLowerCase() as 'write' | 'edit',
-            filePath,
-          });
+          if (event.toolName === 'Write' && typeof event.input['content'] === 'string') {
+            const stats = calcWriteStats(event.input['content']);
+            ops.push({ type: 'write', filePath, ...stats });
+          } else if (event.toolName === 'Edit') {
+            const oldStr = typeof event.input['old_string'] === 'string' ? event.input['old_string'] : '';
+            const newStr = typeof event.input['new_string'] === 'string' ? event.input['new_string'] : '';
+            const stats = calcEditStats(oldStr, newStr);
+            ops.push({ type: 'edit', filePath, ...stats });
+          }
           pendingFileOps.set(session.id, ops);
         }
       }
@@ -222,19 +227,15 @@ async function processEvent(
 
       sessionManager.updateSessionStatus(session.id, 'idle');
 
-      // Send file operations to Telegram if file sharing is enabled
-      if (settings.fileSharingMode !== 'off') {
-        const fileOps = pendingFileOps.get(session.id) ?? [];
-        pendingFileOps.delete(session.id);
-        for (const op of fileOps) {
-          try {
-            await sendFileToTelegram(api, chatId, op, session.emoji);
-          } catch (error) {
-            logger.warn({ error, op }, 'Failed to send file to Telegram');
-          }
+      // Send file change summary if enabled
+      const fileOps = pendingFileOps.get(session.id) ?? [];
+      pendingFileOps.delete(session.id);
+      if (settings.fileSharingMode !== 'off' && fileOps.length > 0) {
+        try {
+          await sendChangeSummary(api, chatId, fileOps, session.emoji);
+        } catch (error) {
+          logger.warn({ error }, 'Failed to send change summary to Telegram');
         }
-      } else {
-        pendingFileOps.delete(session.id);
       }
 
       // Send plan approval document if ExitPlanMode was called
