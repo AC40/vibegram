@@ -116,30 +116,50 @@ async function processEvent(
       break;
 
     case 'text_delta': {
-      let editor = streamingEditors.get(session.id);
-      if (!editor) {
-        editor = new StreamingEditor(api, chatId, session.emoji);
-        streamingEditors.set(session.id, editor);
-      }
-      await editor.appendText(event.text);
-
-      // Buffer text for history persistence
+      // Buffer text for history persistence (always)
       const buffer = assistantTextBuffers.get(session.id) ?? '';
       assistantTextBuffers.set(session.id, buffer + event.text);
+
+      // Only stream in non-minimal mode
+      if (settings.verbosity !== 'minimal') {
+        let editor = streamingEditors.get(session.id);
+        if (!editor) {
+          editor = new StreamingEditor(api, chatId, session.emoji);
+          streamingEditors.set(session.id, editor);
+        }
+        await editor.appendText(event.text);
+      }
       break;
     }
 
     case 'text_done': {
-      // Finalize any streaming editor
+      // Get full text from buffer
+      const fullText = assistantTextBuffers.get(session.id) ?? event.fullText;
+      assistantTextBuffers.delete(session.id);
+
+      // Finalize streaming editor (non-minimal mode) or send single message (minimal mode)
       const editor = streamingEditors.get(session.id);
       if (editor) {
         await editor.finalize(disableNotification);
         streamingEditors.delete(session.id);
+      } else if (settings.verbosity === 'minimal' && fullText) {
+        // Minimal mode: send final text as single message
+        const { renderMarkdown } = await import('../telegram/renderer.js');
+        const rendered = postfixEmoji(renderMarkdown(fullText), session.emoji);
+        try {
+          await api.sendMessage(chatId, rendered, {
+            parse_mode: 'MarkdownV2',
+            disable_notification: disableNotification,
+          });
+        } catch {
+          // Fallback to plain text
+          await api.sendMessage(chatId, postfixEmoji(fullText, session.emoji), {
+            disable_notification: disableNotification,
+          });
+        }
       }
 
       // Persist assistant turn to history
-      const fullText = assistantTextBuffers.get(session.id) ?? event.fullText;
-      assistantTextBuffers.delete(session.id);
       if (fullText) {
         const turn = historyRepo.addAssistantTurn(session.id, fullText);
         currentAssistantTurns.set(session.id, turn.id);
