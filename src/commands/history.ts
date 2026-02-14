@@ -5,6 +5,9 @@ import { buildHistoryPaginationKeyboard } from '../telegram/keyboard-builder.js'
 import { postfixEmoji } from '../telegram/renderer.js';
 import { HISTORY_PAGE_SIZE } from '../constants.js';
 
+// Re-export for backward compatibility
+export const ITEMS_PER_PAGE = HISTORY_PAGE_SIZE;
+
 export async function historyCommand(ctx: BotContext): Promise<void> {
   const userId = ctx.from?.id;
   if (!userId) return;

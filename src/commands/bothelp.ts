@@ -19,6 +19,12 @@ const HELP_TEXT = `*Vibegram — Claude Code via Telegram*
 Plain text → Sent to Claude
 !command → Run bash command
 
+*History & Tracking*
+/history — Browse conversation history
+/search [query] — Search across sessions
+/tools — View recent tool invocations
+/costs — View API cost summary
+
 *Settings*
 /settings — All settings menu
 /verbosity — Output detail level

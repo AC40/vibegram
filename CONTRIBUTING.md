@@ -28,18 +28,44 @@ cp .env.example .env
 ### Running Locally
 
 ```bash
-pnpm dev        # Development mode with hot reload
-pnpm build      # Build for production
-pnpm typecheck  # Type checking
-pnpm test       # Run tests
+pnpm dev           # Development mode with hot reload
+pnpm build         # Build for production
+pnpm typecheck     # Type checking
+```
+
+### Testing
+
+```bash
+pnpm test          # Run all tests
+pnpm test:watch    # Watch mode
+pnpm test:coverage # With coverage report
+```
+
+We use [Vitest](https://vitest.dev) for testing. Tests are located in the `tests/` directory.
+
+## Project Structure
+
+```
+src/
+├── constants.ts      # Centralized configuration values
+├── core/             # Auth, session management, rate limiting
+├── claude/           # Claude CLI integration
+├── db/               # Database repositories
+├── telegram/         # Telegram-specific utilities
+├── commands/         # Bot command handlers
+├── handlers/         # Message type handlers
+├── services/         # Business logic
+└── utils/            # Helpers
+
+tests/                # Test files (*.test.ts)
 ```
 
 ## Code Style
 
-- We use TypeScript with strict mode enabled
-- Code is formatted consistently (run `pnpm typecheck` before committing)
+- TypeScript with strict mode enabled
 - Use meaningful variable and function names
 - Add comments for complex logic
+- Magic numbers should go in `src/constants.ts`
 
 ## Commit Messages
 
@@ -58,14 +84,31 @@ Examples:
 feat: add conversation history search command
 fix: handle empty voice messages gracefully
 docs: update README with new commands
+test: add rate limiter tests
 ```
 
 ## Pull Request Process
 
 1. Ensure your code passes type checking: `pnpm typecheck`
-2. Ensure tests pass: `pnpm test`
-3. Update documentation if needed
-4. Submit a pull request with a clear description
+2. Ensure all tests pass: `pnpm test`
+3. Add tests for new functionality
+4. Update documentation if needed
+5. Submit a pull request with a clear description
+
+## Adding New Commands
+
+1. Create a new file in `src/commands/` (e.g., `mycommand.ts`)
+2. Export an async handler function
+3. Register it in `src/commands/index.ts`
+4. Add to the bot help in `src/commands/bothelp.ts`
+5. Update the README with the new command
+
+## Security Considerations
+
+- Path operations should use `isPathSafe()` from `src/telegram/directory-browser.ts`
+- File downloads are limited to 20MB (see `MAX_DOCUMENT_SIZE_BYTES`)
+- Rate limiting is enforced (20 requests/minute per user)
+- Never expose sensitive paths (`/etc`, `/root`, etc.)
 
 ## Reporting Issues
 

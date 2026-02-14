@@ -8,15 +8,18 @@ A Telegram bot that turns your chat into a full-featured [Claude Code](https://d
 
 ## Features
 
-- **Multi-session management** -- up to 6 concurrent Claude sessions per user, each with its own working directory and emoji identifier
-- **Real-time streaming** -- responses stream into Telegram as they are generated, with Markdown formatting on completion
-- **Voice input** -- send a voice message and it is transcribed via Deepgram, then forwarded to Claude
-- **Photo & document support** -- attach images or files and Claude processes them as part of the conversation
-- **Direct bash execution** -- prefix a message with `!` to run a shell command in the session's working directory
-- **Directory browser** -- navigate the file system with inline keyboard buttons
-- **Permission modes** -- choose between `default`, `acceptEdits`, `plan`, and `dontAsk` per session
-- **Persistent settings** -- user preferences and sessions are stored in SQLite
-- **Smart notifications** -- configurable notification modes: `smart`, `all`, or `none`
+- **Multi-session management** — up to 6 concurrent Claude sessions per user, each with its own working directory and emoji identifier
+- **Real-time streaming** — responses stream into Telegram as they are generated, with Markdown formatting on completion
+- **Voice input** — send a voice message and it is transcribed via Deepgram, then forwarded to Claude
+- **Photo & document support** — attach images or files and Claude processes them as part of the conversation
+- **Direct bash execution** — prefix a message with `!` to run a shell command in the session's working directory
+- **Directory browser** — navigate the file system with inline keyboard buttons (with path sanitization for security)
+- **Permission modes** — choose between `default`, `acceptEdits`, `plan`, and `dontAsk` per session
+- **Persistent settings** — user preferences and sessions are stored in SQLite
+- **Smart notifications** — configurable notification modes: `smart`, `all`, or `none`
+- **Conversation history** — browse and search past conversations with full-text search
+- **Cost tracking** — monitor API costs per session and total usage
+- **Rate limiting** — built-in protection against API abuse (20 requests/minute)
 
 ## Prerequisites
 
@@ -30,7 +33,7 @@ A Telegram bot that turns your chat into a full-featured [Claude Code](https://d
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-username>/vibegram.git
+git clone https://github.com/AC40/vibegram.git
 cd vibegram
 
 # Install dependencies
@@ -51,6 +54,8 @@ cp .env.example .env
 | `DEEPGRAM_API_KEY` | No | Deepgram API key for voice transcription |
 | `SQLITE_PATH` | No | Database file path (defaults to `./data/vibegram.db`) |
 | `LOG_LEVEL` | No | Pino log level: `trace`, `debug`, `info`, `warn`, `error`, `fatal` (defaults to `info`) |
+| `PORT` | No | HTTP server port for webhooks/health checks (defaults to `4020`) |
+| `USE_WEBHOOK` | No | Set to `true` to use webhook mode instead of polling |
 
 ## Usage
 
@@ -58,6 +63,8 @@ cp .env.example .env
 
 ```bash
 pnpm dev        # Watch mode with tsx
+pnpm test       # Run tests
+pnpm typecheck  # Type checking
 ```
 
 ### Production
@@ -67,13 +74,9 @@ pnpm build      # Build with tsup → dist/
 pnpm start      # Run compiled output
 ```
 
-### Type Checking
-
-```bash
-pnpm typecheck  # tsc --noEmit
-```
-
 ## Bot Commands
+
+### Session Management
 
 | Command | Description |
 |---|---|
@@ -87,11 +90,37 @@ pnpm typecheck  # tsc --noEmit
 | `/clear` | Reset session context |
 | `/cancel` | Abort the current query |
 | `/status` | Show session status |
-| `/mode` | Set permission mode |
-| `/verbosity` | Set output verbosity (`minimal` / `normal` / `verbose`) |
-| `/notifications` | Configure notification behavior |
-| `/settings` | View and edit user preferences |
+
+### Settings
+
+| Command | Description |
+|---|---|
+| `/mode` | Set permission mode (`default`, `acceptEdits`, `plan`, `dontAsk`) |
+| `/verbosity` | Set output verbosity (`minimal`, `normal`, `verbose`) |
+| `/notifications` | Configure notification behavior (`smart`, `all`, `none`) |
+| `/settings` | View user preferences |
+
+### History & Tracking
+
+| Command | Description |
+|---|---|
+| `/history` | Browse conversation history (paginated) |
+| `/search <query>` | Full-text search across all sessions |
+| `/tools` | View recent tool invocations |
+| `/costs` | View API cost summary |
+
+### Help
+
+| Command | Description |
+|---|---|
 | `/bothelp` | Show command reference |
+| `/help` | Alias for `/bothelp` |
+
+## Verbosity Modes
+
+- **minimal** — Only shows the final response (no streaming, no status messages)
+- **normal** — Shows streaming responses with completion summary
+- **verbose** — Shows all tool invocations and processing messages
 
 ## Architecture
 
@@ -99,33 +128,53 @@ pnpm typecheck  # tsc --noEmit
 src/
 ├── index.ts                 # Entry point
 ├── config.ts                # Zod-validated environment config
+├── constants.ts             # Centralized configuration constants
 ├── bot.ts                   # Grammy bot setup and middleware
-├── core/                    # Auth, routing, session lifecycle, message queue
+├── server.ts                # HTTP server for webhooks/health
+├── core/                    # Auth, routing, session lifecycle, message queue, rate limiting
 ├── claude/                  # Claude CLI bridge and event routing
-├── db/                      # SQLite database, sessions & settings repos
+├── db/                      # SQLite database, sessions, settings, history repos
 ├── telegram/                # Streaming editor, keyboards, Markdown renderer, chunker
 ├── commands/                # /command handlers
 ├── handlers/                # Text, bash, voice, photo, document, callback queries
-├── services/                # Deepgram transcription, bash executor
+├── services/                # Deepgram transcription, bash executor, file operations
+├── types/                   # TypeScript interfaces
 └── utils/                   # Logger, Telegram file helpers
 ```
 
 ### Key Design Decisions
 
-- **Claude CLI over SDK** -- Claude is invoked as a child process (`claude -p --output-format stream-json`) for streaming JSON events, rather than through an SDK
-- **Per-session message queue** -- prevents concurrent queries to the same Claude process
-- **Markdown on finalize only** -- during streaming, messages are sent as plain text to avoid MarkdownV2 parse errors from partial content; formatting is applied on the final edit
-- **Graceful shutdown** -- SIGINT/SIGTERM handlers close the database and stop the bot cleanly
+- **Claude CLI over SDK** — Claude is invoked as a child process (`claude -p --output-format stream-json`) for streaming JSON events
+- **Per-session message queue** — prevents concurrent queries to the same Claude process
+- **Markdown on finalize only** — during streaming, messages are sent as plain text; formatting is applied on the final edit
+- **Graceful shutdown** — SIGINT/SIGTERM handlers close the database and stop the bot cleanly
+- **Session auto-cleanup** — inactive sessions (30+ days) are automatically removed on startup
+
+### Security
+
+- **Path sanitization** — directory browser blocks access to system paths (`/etc`, `/root`, `/var`, etc.)
+- **File size limits** — document uploads capped at 20MB
+- **Rate limiting** — 20 requests per minute per user
+- **User allowlist** — only authorized Telegram user IDs can use the bot
 
 ## Tech Stack
 
-- [Grammy](https://grammy.dev) -- Telegram bot framework
-- [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) -- SQLite driver
-- [Pino](https://getpino.io) -- Structured logging
-- [telegramify-markdown](https://github.com/nicepkg/telegramify-markdown) -- Markdown to Telegram MarkdownV2
-- [Zod](https://zod.dev) -- Runtime schema validation
-- [tsup](https://tsup.egoist.dev) -- TypeScript bundler
-- [Deepgram SDK](https://developers.deepgram.com) -- Voice-to-text transcription
+- [Grammy](https://grammy.dev) — Telegram bot framework with auto-retry
+- [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) — SQLite driver with WAL mode
+- [Vitest](https://vitest.dev) — Testing framework
+- [Pino](https://getpino.io) — Structured logging
+- [telegramify-markdown](https://github.com/nicepkg/telegramify-markdown) — Markdown to Telegram MarkdownV2
+- [Zod](https://zod.dev) — Runtime schema validation
+- [tsup](https://tsup.egoist.dev) — TypeScript bundler
+- [Deepgram SDK](https://developers.deepgram.com) — Voice-to-text transcription
+
+## Testing
+
+```bash
+pnpm test              # Run all tests
+pnpm test:watch        # Watch mode
+pnpm test:coverage     # With coverage report
+```
 
 ## Contributing
 

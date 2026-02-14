@@ -2,7 +2,7 @@ import type { Api } from 'grammy';
 import { chunkText, SAFE_LIMIT } from './chunker.js';
 import { renderMarkdown, postfixEmoji } from './renderer.js';
 import { logger } from '../utils/logger.js';
-import { STREAMING_STREAMING_EDIT_INTERVAL_MS } from '../constants.js';
+import { STREAMING_EDIT_INTERVAL_MS } from '../constants.js';
 
 export class StreamingEditor {
   private messageId: number | null = null;
