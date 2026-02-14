@@ -2,8 +2,7 @@ import type { Api } from 'grammy';
 import { chunkText, SAFE_LIMIT } from './chunker.js';
 import { renderMarkdown, postfixEmoji } from './renderer.js';
 import { logger } from '../utils/logger.js';
-
-const EDIT_INTERVAL_MS = 1000;
+import { STREAMING_STREAMING_EDIT_INTERVAL_MS } from '../constants.js';
 
 export class StreamingEditor {
   private messageId: number | null = null;
@@ -35,12 +34,12 @@ export class StreamingEditor {
 
   private async scheduleEdit(): Promise<void> {
     const now = Date.now();
-    if (now - this.lastEditTime < EDIT_INTERVAL_MS) {
+    if (now - this.lastEditTime < STREAMING_EDIT_INTERVAL_MS) {
       if (!this.editTimer) {
         this.editTimer = setTimeout(() => {
           this.editTimer = null;
           this.flushEdit();
-        }, EDIT_INTERVAL_MS - (now - this.lastEditTime));
+        }, STREAMING_EDIT_INTERVAL_MS - (now - this.lastEditTime));
       }
       return;
     }

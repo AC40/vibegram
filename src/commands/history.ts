@@ -3,8 +3,7 @@ import * as sessionManager from '../core/session-manager.js';
 import * as historyRepo from '../db/history-repository.js';
 import { buildHistoryPaginationKeyboard } from '../telegram/keyboard-builder.js';
 import { postfixEmoji } from '../telegram/renderer.js';
-
-const ITEMS_PER_PAGE = 5;
+import { HISTORY_PAGE_SIZE } from '../constants.js';
 
 export async function historyCommand(ctx: BotContext): Promise<void> {
   const userId = ctx.from?.id;
@@ -22,11 +21,11 @@ export async function historyCommand(ctx: BotContext): Promise<void> {
     return;
   }
 
-  const turns = historyRepo.getHistory(session.id, ITEMS_PER_PAGE, 0);
-  const formatted = formatHistoryPage(turns, 1, Math.ceil(total / ITEMS_PER_PAGE));
+  const turns = historyRepo.getHistory(session.id, HISTORY_PAGE_SIZE, 0);
+  const formatted = formatHistoryPage(turns, 1, Math.ceil(total / HISTORY_PAGE_SIZE));
 
   await ctx.reply(postfixEmoji(formatted, session.emoji), {
-    reply_markup: buildHistoryPaginationKeyboard(session.id, 0, total, ITEMS_PER_PAGE),
+    reply_markup: buildHistoryPaginationKeyboard(session.id, 0, total, HISTORY_PAGE_SIZE),
   });
 }
 
@@ -57,4 +56,4 @@ function formatTime(isoString: string): string {
   return date.toLocaleDateString();
 }
 
-export { ITEMS_PER_PAGE };
+export { HISTORY_PAGE_SIZE };

@@ -12,7 +12,7 @@ import { setCancelBridge } from './commands/cancel.js';
 import { setQueryStatusBridge } from './commands/querystatus.js';
 import { ClaudeBridge } from './claude/claude-bridge.js';
 import { routeClaudeEvent } from './claude/event-router.js';
-import { getSessionById, getAllUserIds } from './db/session-repository.js';
+import { getSessionById, getAllUserIds, cleanupInactiveSessions } from './db/session-repository.js';
 import { startHttpServer, stopHttpServer } from './server.js';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
@@ -21,6 +21,12 @@ import type { ClaudeEvent } from './types/claude.js';
 async function main(): Promise<void> {
   // Initialize database
   initDatabase();
+
+  // Cleanup inactive sessions on startup
+  const cleanedUp = cleanupInactiveSessions();
+  if (cleanedUp > 0) {
+    logger.info({ count: cleanedUp }, 'Cleaned up inactive sessions');
+  }
 
   // Reload all user sessions from database into memory
   // This ensures existing sessions are active after bot restart

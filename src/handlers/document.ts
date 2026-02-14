@@ -1,7 +1,7 @@
 import type { BotContext } from '../bot.js';
 import * as sessionManager from '../core/session-manager.js';
 import { getQueue } from '../core/message-queue.js';
-import { downloadFile } from '../utils/telegram-helpers.js';
+import { downloadFile, FileTooLargeError } from '../utils/telegram-helpers.js';
 import type { ClaudeBridge } from '../claude/claude-bridge.js';
 import { logger } from '../utils/logger.js';
 
@@ -68,6 +68,10 @@ export async function handleDocumentMessage(ctx: BotContext): Promise<void> {
 
     await claudeBridge.sendMessageWithOptions(session.id, prompt, options);
   } catch (error) {
+    if (error instanceof FileTooLargeError) {
+      await ctx.reply(`❌ File too large: ${error.message}`);
+      return;
+    }
     logger.error({ error }, 'Document handling failed');
     await ctx.reply('Failed to process document.');
   }

@@ -18,6 +18,8 @@ import { settingsCommand } from './settings.js';
 import { bothelpCommand } from './bothelp.js';
 import { historyCommand } from './history.js';
 import { searchCommand } from './search.js';
+import { toolsCommand } from './tools.js';
+import { costsCommand } from './costs.js';
 
 export function registerCommands(bot: Bot<BotContext>): void {
   bot.command('start', startCommand);
@@ -39,4 +41,6 @@ export function registerCommands(bot: Bot<BotContext>): void {
   bot.command('help', bothelpCommand);
   bot.command('history', historyCommand);
   bot.command('search', searchCommand);
+  bot.command('tools', toolsCommand);
+  bot.command('costs', costsCommand);
 }

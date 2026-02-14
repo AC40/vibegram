@@ -6,11 +6,37 @@ import { logger } from '../utils/logger.js';
 
 let db: Database.Database;
 
+const MAX_RETRIES = 3;
+const RETRY_DELAY_MS = 100;
+
 export function getDb(): Database.Database {
   if (!db) {
     throw new Error('Database not initialized. Call initDatabase() first.');
   }
   return db;
+}
+
+/**
+ * Execute a database operation with retry logic for SQLITE_BUSY errors
+ */
+export function withRetry<T>(operation: () => T, retries = MAX_RETRIES): T {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return operation();
+    } catch (error) {
+      const isBusy = error instanceof Error && error.message.includes('SQLITE_BUSY');
+      if (!isBusy || attempt === retries) {
+        throw error;
+      }
+      logger.debug({ attempt, retries }, 'Database busy, retrying...');
+      // Synchronous sleep for SQLite retry
+      const start = Date.now();
+      while (Date.now() - start < RETRY_DELAY_MS * attempt) {
+        // Busy wait
+      }
+    }
+  }
+  throw new Error('Unreachable');
 }
 
 export function initDatabase(): Database.Database {
@@ -20,6 +46,7 @@ export function initDatabase(): Database.Database {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
   db.pragma('foreign_keys = ON');
+  db.pragma('busy_timeout = 5000'); // Wait up to 5s for locks
 
   runMigrations(db);
   logger.info({ path: dbPath }, 'Database initialized');
