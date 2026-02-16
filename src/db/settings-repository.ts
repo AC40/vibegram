@@ -1,6 +1,13 @@
 import { getDb } from './database.js';
 import { config } from '../config.js';
-import type { CrossSessionVisibility, FileSharingMode, NotificationMode, UserSettings, Verbosity } from '../types/session.js';
+import type {
+  BackendType,
+  CrossSessionVisibility,
+  FileSharingMode,
+  NotificationMode,
+  UserSettings,
+  Verbosity,
+} from '../types/session.js';
 
 function rowToSettings(row: Record<string, unknown>): UserSettings {
   return {
@@ -9,8 +16,10 @@ function rowToSettings(row: Record<string, unknown>): UserSettings {
     verbosity: row['verbosity'] as Verbosity,
     notificationMode: row['notification_mode'] as NotificationMode,
     crossSessionVisibility: row['cross_session_visibility'] as CrossSessionVisibility,
+    defaultBackend: ((row['default_backend'] as BackendType | undefined) ?? 'codex'),
     defaultPermissionMode: row['default_permission_mode'] as string,
     fileSharingMode: (row['file_sharing_mode'] as FileSharingMode) ?? 'auto',
+    defaultCodexMode: (row['default_codex_mode'] as string | undefined) ?? 'workspace-write',
   };
 }
 
@@ -29,7 +38,19 @@ export function getOrCreateSettings(userId: number): UserSettings {
 
 export function updateSettings(
   userId: number,
-  updates: Partial<Pick<UserSettings, 'defaultDirectory' | 'verbosity' | 'notificationMode' | 'crossSessionVisibility' | 'defaultPermissionMode' | 'fileSharingMode'>>
+  updates: Partial<
+    Pick<
+      UserSettings,
+      | 'defaultDirectory'
+      | 'verbosity'
+      | 'notificationMode'
+      | 'crossSessionVisibility'
+      | 'defaultBackend'
+      | 'defaultPermissionMode'
+      | 'fileSharingMode'
+      | 'defaultCodexMode'
+    >
+  >
 ): void {
   const db = getDb();
   const fields: string[] = [];
@@ -39,8 +60,10 @@ export function updateSettings(
   if (updates.verbosity !== undefined) { fields.push('verbosity = ?'); values.push(updates.verbosity); }
   if (updates.notificationMode !== undefined) { fields.push('notification_mode = ?'); values.push(updates.notificationMode); }
   if (updates.crossSessionVisibility !== undefined) { fields.push('cross_session_visibility = ?'); values.push(updates.crossSessionVisibility); }
+  if (updates.defaultBackend !== undefined) { fields.push('default_backend = ?'); values.push(updates.defaultBackend); }
   if (updates.defaultPermissionMode !== undefined) { fields.push('default_permission_mode = ?'); values.push(updates.defaultPermissionMode); }
   if (updates.fileSharingMode !== undefined) { fields.push('file_sharing_mode = ?'); values.push(updates.fileSharingMode); }
+  if (updates.defaultCodexMode !== undefined) { fields.push('default_codex_mode = ?'); values.push(updates.defaultCodexMode); }
 
   if (fields.length === 0) return;
   values.push(userId);

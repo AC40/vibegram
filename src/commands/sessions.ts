@@ -17,7 +17,7 @@ export async function sessionsCommand(ctx: BotContext): Promise<void> {
 
   const lines = sessions.map((s) => {
     const active = s.id === activeId ? ' ← active' : '';
-    return `${s.emoji} ${s.name} (${s.status})${active}`;
+    return `${s.emoji} ${s.name} [${s.backend}] (${s.status})${active}`;
   });
 
   await ctx.reply(`Sessions:\n${lines.join('\n')}`, {

@@ -4,28 +4,31 @@
 [![Node.js](https://img.shields.io/badge/Node.js-%3E%3D22-brightgreen)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.7-blue)](https://www.typescriptlang.org/)
 
-A Telegram bot that turns your chat into a full-featured [Claude Code](https://docs.anthropic.com/en/docs/claude-code) client. Manage multiple concurrent coding sessions, stream responses in real time, and work with files, voice, and images — all from Telegram.
+A Telegram bot that turns your chat into a full-featured coding agent client. It supports both [Codex CLI](https://github.com/openai/codex) and [Claude Code](https://docs.anthropic.com/en/docs/claude-code), with per-session backend selection, streaming responses, files, voice, and images.
 
 ## Features
 
-- **Multi-session management** — up to 6 concurrent Claude sessions per user, each with its own working directory and emoji identifier
-- **Real-time streaming** — responses stream into Telegram as they are generated, with Markdown formatting on completion
-- **Voice input** — send a voice message and it is transcribed via Deepgram, then forwarded to Claude
-- **Photo & document support** — attach images or files and Claude processes them as part of the conversation
-- **Direct bash execution** — prefix a message with `!` to run a shell command in the session's working directory
-- **Directory browser** — navigate the file system with inline keyboard buttons (with path sanitization for security)
-- **Permission modes** — choose between `default`, `acceptEdits`, `plan`, and `dontAsk` per session
-- **Persistent settings** — user preferences and sessions are stored in SQLite
-- **Smart notifications** — configurable notification modes: `smart`, `all`, or `none`
-- **Conversation history** — browse and search past conversations with full-text search
-- **Cost tracking** — monitor API costs per session and total usage
-- **Rate limiting** — built-in protection against API abuse (20 requests/minute)
+- **Multi-session management** -- up to 6 concurrent sessions per user, each with its own backend, working directory, and emoji identifier
+- **Per-session backend selection** -- choose `codex` or `claude` when creating a session
+- **Real-time streaming** -- responses stream into Telegram as they are generated, with Markdown formatting on completion
+- **Voice input** -- send a voice message and it is transcribed via Deepgram, then forwarded to the active backend
+- **Photo & document support** -- attach images or files and they are processed as part of the conversation
+- **Direct bash execution** -- prefix a message with `!` to run a shell command in the session's working directory
+- **Directory browser** -- navigate the file system with inline keyboard buttons (with path sanitization)
+- **Backend-specific modes** -- Claude modes (`default`, `acceptEdits`, `plan`, `dontAsk`) and Codex modes (`read-only`, `workspace-write`, `full-auto`, `danger`)
+- **Codex plan approval gate** -- auto-detects `<proposed_plan>` output and requires Telegram approval/request-changes/abort before continuing
+- **Persistent settings** -- user preferences and sessions are stored in SQLite
+- **Smart notifications** -- configurable notification modes: `smart`, `all`, or `none`
+- **Conversation history** -- browse and search past conversations with full-text search
+- **Cost tracking** -- monitor API costs per session and total usage
+- **Rate limiting** -- built-in protection against API abuse (20 requests/minute)
 
 ## Prerequisites
 
 - **Node.js** >= 22
 - **pnpm** >= 9
-- **Claude CLI** installed and authenticated (`claude login`)
+- **Codex CLI** installed and authenticated (`codex login`)
+- **Claude CLI** installed and authenticated (`claude login`) if you want Claude sessions
 - A Telegram bot token from [@BotFather](https://t.me/BotFather)
 - *(Optional)* A [Deepgram](https://deepgram.com) API key for voice transcription
 
@@ -70,7 +73,7 @@ pnpm typecheck  # Type checking
 ### Production
 
 ```bash
-pnpm build      # Build with tsup → dist/
+pnpm build      # Build with tsup -> dist/
 pnpm start      # Run compiled output
 ```
 
@@ -81,7 +84,7 @@ pnpm start      # Run compiled output
 | Command | Description |
 |---|---|
 | `/start` | Initialize the bot |
-| `/new` | Create a new Claude session |
+| `/new [backend] [name] [path]` | Create a new session (`codex`/`claude`) |
 | `/sessions` | List all active sessions |
 | `/switch` | Switch between sessions |
 | `/delete` | Delete a session |
@@ -95,10 +98,10 @@ pnpm start      # Run compiled output
 
 | Command | Description |
 |---|---|
-| `/mode` | Set permission mode (`default`, `acceptEdits`, `plan`, `dontAsk`) |
-| `/verbosity` | Set output verbosity (`minimal`, `normal`, `verbose`) |
-| `/notifications` | Configure notification behavior (`smart`, `all`, `none`) |
-| `/settings` | View user preferences |
+| `/mode` | Set backend-specific mode for active session |
+| `/verbosity` | Set output verbosity (`minimal` / `normal` / `verbose`) |
+| `/notifications` | Configure notification behavior |
+| `/settings` | View and edit user preferences |
 
 ### History & Tracking
 
@@ -118,9 +121,9 @@ pnpm start      # Run compiled output
 
 ## Verbosity Modes
 
-- **minimal** — Only shows the final response (no streaming, no status messages)
-- **normal** — Shows streaming responses with completion summary
-- **verbose** — Shows all tool invocations and processing messages
+- **minimal** -- Only shows the final response (no streaming, no status messages)
+- **normal** -- Shows streaming responses with completion summary
+- **verbose** -- Shows all tool invocations and processing messages
 
 ## Architecture
 
@@ -131,8 +134,9 @@ src/
 ├── constants.ts             # Centralized configuration constants
 ├── bot.ts                   # Grammy bot setup and middleware
 ├── server.ts                # HTTP server for webhooks/health
-├── core/                    # Auth, routing, session lifecycle, message queue, rate limiting
-├── claude/                  # Claude CLI bridge and event routing
+├── core/                    # Auth, routing, backend factory, session lifecycle, message queue
+├── claude/                  # Claude bridge + shared event routing
+├── codex/                   # Codex CLI bridge
 ├── db/                      # SQLite database, sessions, settings, history repos
 ├── telegram/                # Streaming editor, keyboards, Markdown renderer, chunker
 ├── commands/                # /command handlers
@@ -144,29 +148,29 @@ src/
 
 ### Key Design Decisions
 
-- **Claude CLI over SDK** — Claude is invoked as a child process (`claude -p --output-format stream-json`) for streaming JSON events
-- **Per-session message queue** — prevents concurrent queries to the same Claude process
-- **Markdown on finalize only** — during streaming, messages are sent as plain text; formatting is applied on the final edit
-- **Graceful shutdown** — SIGINT/SIGTERM handlers close the database and stop the bot cleanly
-- **Session auto-cleanup** — inactive sessions (30+ days) are automatically removed on startup
+- **CLI bridges over SDKs** -- both backends are invoked as child processes (`claude` and `codex exec --json`) and normalized into one event pipeline
+- **Per-session message queue** -- prevents concurrent queries to the same backend process
+- **Markdown on finalize only** -- during streaming, messages are sent as plain text; formatting is applied on final edit
+- **Graceful shutdown** -- SIGINT/SIGTERM handlers close the database and stop the bot cleanly
+- **Session auto-cleanup** -- inactive sessions (30+ days) are automatically removed on startup
 
 ### Security
 
-- **Path sanitization** — directory browser blocks access to system paths (`/etc`, `/root`, `/var`, etc.)
-- **File size limits** — document uploads capped at 20MB
-- **Rate limiting** — 20 requests per minute per user
-- **User allowlist** — only authorized Telegram user IDs can use the bot
+- **Path sanitization** -- directory browser blocks access to sensitive system paths
+- **File size limits** -- document uploads capped at 20MB
+- **Rate limiting** -- 20 requests per minute per user
+- **User allowlist** -- only authorized Telegram user IDs can use the bot
 
 ## Tech Stack
 
-- [Grammy](https://grammy.dev) — Telegram bot framework with auto-retry
-- [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) — SQLite driver with WAL mode
-- [Vitest](https://vitest.dev) — Testing framework
-- [Pino](https://getpino.io) — Structured logging
-- [telegramify-markdown](https://github.com/nicepkg/telegramify-markdown) — Markdown to Telegram MarkdownV2
-- [Zod](https://zod.dev) — Runtime schema validation
-- [tsup](https://tsup.egoist.dev) — TypeScript bundler
-- [Deepgram SDK](https://developers.deepgram.com) — Voice-to-text transcription
+- [Grammy](https://grammy.dev) -- Telegram bot framework with auto-retry
+- [better-sqlite3](https://github.com/WiseLibs/better-sqlite3) -- SQLite driver with WAL mode
+- [Vitest](https://vitest.dev) -- Testing framework
+- [Pino](https://getpino.io) -- Structured logging
+- [telegramify-markdown](https://github.com/nicepkg/telegramify-markdown) -- Markdown to Telegram MarkdownV2
+- [Zod](https://zod.dev) -- Runtime schema validation
+- [tsup](https://tsup.egoist.dev) -- TypeScript bundler
+- [Deepgram SDK](https://developers.deepgram.com) -- Voice-to-text transcription
 
 ## Testing
 
@@ -182,4 +186,4 @@ Contributions are welcome! Please read our [Contributing Guide](CONTRIBUTING.md)
 
 ## License
 
-[MIT](LICENSE) — see the [LICENSE](LICENSE) file for details.
+[MIT](LICENSE) -- see the [LICENSE](LICENSE) file for details.

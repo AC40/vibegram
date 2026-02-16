@@ -1,7 +1,6 @@
-import { randomUUID } from 'crypto';
 import * as sessionRepo from '../db/session-repository.js';
 import * as settingsRepo from '../db/settings-repository.js';
-import type { Session, UserSettings, BufferedMessage } from '../types/session.js';
+import type { BackendType, BufferedMessage, Session, UserSettings } from '../types/session.js';
 import { logger } from '../utils/logger.js';
 
 const activeSessionIds = new Map<number, string>(); // userId → sessionId
@@ -21,11 +20,16 @@ export function setActiveSession(userId: number, sessionId: string): void {
   activeSessionIds.set(userId, sessionId);
 }
 
-export function createSession(userId: number, name: string, cwd: string): Session {
+export function getSessionById(sessionId: string): Session | null {
+  return sessionRepo.getSessionById(sessionId);
+}
+
+export function createSession(userId: number, name: string, cwd: string, backend: BackendType): Session {
   const settings = settingsRepo.getOrCreateSettings(userId);
-  const session = sessionRepo.createSession(userId, name, cwd, settings.defaultPermissionMode);
+  const defaultMode = backend === 'codex' ? settings.defaultCodexMode : settings.defaultPermissionMode;
+  const session = sessionRepo.createSession(userId, name, cwd, backend, defaultMode);
   setActiveSession(userId, session.id);
-  logger.info({ userId, sessionId: session.id, name, emoji: session.emoji }, 'Session created');
+  logger.info({ userId, sessionId: session.id, name, emoji: session.emoji, backend }, 'Session created');
   return session;
 }
 
@@ -75,8 +79,8 @@ export function updateSessionCwd(sessionId: string, cwd: string): void {
   sessionRepo.updateSession(sessionId, { cwd });
 }
 
-export function updateSessionClaudeId(sessionId: string, claudeSessionId: string): void {
-  sessionRepo.updateSession(sessionId, { claudeSessionId });
+export function updateSessionBackendId(sessionId: string, backendSessionId: string): void {
+  sessionRepo.updateSession(sessionId, { backendSessionId });
 }
 
 export function updateSessionStatus(sessionId: string, status: Session['status']): void {
@@ -88,7 +92,7 @@ export function updateSessionPermissionMode(sessionId: string, permissionMode: s
 }
 
 export function clearSession(sessionId: string): void {
-  sessionRepo.clearClaudeSession(sessionId);
+  sessionRepo.clearBackendSession(sessionId);
 }
 
 export function bufferMessage(sessionId: string, message: BufferedMessage): void {

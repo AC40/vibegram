@@ -1,6 +1,7 @@
 import { InlineKeyboard } from 'grammy';
 import type { Session } from '../types/session.js';
 import { registerPath } from './path-registry.js';
+import type { BackendType } from '../types/session.js';
 
 export function buildSessionListKeyboard(sessions: Session[], activeId: string | null): InlineKeyboard {
   const keyboard = new InlineKeyboard();
@@ -54,13 +55,24 @@ export function buildDirectoryKeyboard(dirs: string[], currentPath: string): Inl
   return keyboard;
 }
 
-export function buildPermissionModeKeyboard(): InlineKeyboard {
+export function buildPermissionModeKeyboard(backend: BackendType, current?: string): InlineKeyboard {
+  const mark = (mode: string) => (mode === current ? '✓ ' : '');
+
+  if (backend === 'codex') {
+    return new InlineKeyboard()
+      .text(`${mark('read-only')}🔒 Read Only`, 'mode:read-only')
+      .text(`${mark('workspace-write')}🛠 Workspace`, 'mode:workspace-write')
+      .row()
+      .text(`${mark('full-auto')}⚡ Full Auto`, 'mode:full-auto')
+      .text(`${mark('danger')}☠ Danger`, 'mode:danger');
+  }
+
   return new InlineKeyboard()
-    .text('📄 Default', 'mode:default')
-    .text('📝 Accept Edits', 'mode:acceptEdits')
+    .text(`${mark('default')}📄 Default`, 'mode:default')
+    .text(`${mark('acceptEdits')}📝 Accept Edits`, 'mode:acceptEdits')
     .row()
-    .text('🏗️ Plan', 'mode:plan')
-    .text("🚀 Don't Ask", 'mode:dontAsk');
+    .text(`${mark('plan')}🏗 Plan`, 'mode:plan')
+    .text(`${mark('dontAsk')}🚀 Don't Ask`, 'mode:dontAsk');
 }
 
 export function buildNotificationKeyboard(current: string): InlineKeyboard {
@@ -94,13 +106,27 @@ export function buildSettingsKeyboard(): InlineKeyboard {
     .text('🔒 Permission Mode', 'settings:mode');
 }
 
+export function buildBackendSelectionKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('⚡ Codex', 'newbackend:codex')
+    .text('🧠 Claude', 'newbackend:claude');
+}
+
 export function buildConfirmKeyboard(action: string, targetId: string): InlineKeyboard {
   return new InlineKeyboard()
     .text('✅ Confirm', `confirm:${action}:${targetId}`)
     .text('❌ Cancel', 'cancel_action');
 }
 
-export function buildPlanApprovalKeyboard(sessionId: string): InlineKeyboard {
+export function buildPlanApprovalKeyboard(sessionId: string, backend: BackendType): InlineKeyboard {
+  if (backend === 'codex') {
+    return new InlineKeyboard()
+      .text('✅ Approve', `plan:approve:${sessionId}`)
+      .text('✏️ Request Changes', `plan:changes:${sessionId}`)
+      .row()
+      .text('❌ Abort', `plan:abort:${sessionId}`);
+  }
+
   return new InlineKeyboard()
     .text('🚀 Approve (bypass)', `plan:bypass:${sessionId}`)
     .text('📝 Approve (edits)', `plan:accept:${sessionId}`)

@@ -1,8 +1,8 @@
 import { type Api, InputFile } from 'grammy';
 import { readFile, readdir, stat } from 'fs/promises';
+import { basename, join } from 'path';
 import { homedir } from 'os';
-import { join, basename } from 'path';
-import type { ClaudeEvent } from '../types/claude.js';
+import type { BackendEvent } from '../types/claude.js';
 import type { Session, UserSettings } from '../types/session.js';
 import { StreamingEditor } from '../telegram/streaming-editor.js';
 import { postfixEmoji } from '../telegram/renderer.js';
@@ -14,8 +14,12 @@ import * as historyRepo from '../db/history-repository.js';
 import { sendChangeSummary, calcWriteStats, calcEditStats, type FileOperation } from '../services/file-sender.js';
 
 const streamingEditors = new Map<string, StreamingEditor>();
+const sawTextDelta = new Set<string>();
+const codexTurnBuffer = new Map<string, string>();
+
 const lastPlanFilePaths = new Map<string, string>();
 const pendingPlanApprovals = new Set<string>();
+const pendingPlanTexts = new Map<string, string>();
 const eventChains = new Map<string, Promise<void>>();
 const currentAssistantTurns = new Map<string, number>();
 const pendingFileOps = new Map<string, FileOperation[]>();
@@ -25,6 +29,11 @@ const MAX_DETAIL_LENGTH = 80;
 
 function truncate(text: string, max: number = MAX_DETAIL_LENGTH): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function extractProposedPlan(text: string): string | null {
+  const match = text.match(/<proposed_plan>[\s\S]*?<\/proposed_plan>/i);
+  return match ? match[0] : null;
 }
 
 function formatToolDetail(toolName: string, input: Record<string, unknown>): string | undefined {
@@ -49,14 +58,11 @@ function formatToolDetail(toolName: string, input: Record<string, unknown>): str
   }
 }
 
-function getNotificationSetting(event: ClaudeEvent, settings: UserSettings): boolean {
-  // Returns `disable_notification` value
+function getNotificationSetting(event: BackendEvent, settings: UserSettings): boolean {
   if (settings.notificationMode === 'all') return false;
   if (settings.notificationMode === 'none') return true;
-
-  // 'smart' mode
   if (event.type === 'result') return false;
-  return true; // everything else is silent
+  return true;
 }
 
 function shouldShowMessage(session: Session, settings: UserSettings): boolean {
@@ -65,39 +71,30 @@ function shouldShowMessage(session: Session, settings: UserSettings): boolean {
   return session.id === activeId;
 }
 
-export function routeClaudeEvent(
-  api: Api,
-  chatId: number,
-  session: Session,
-  event: ClaudeEvent,
-): void {
+export function routeBackendEvent(api: Api, chatId: number, session: Session, event: BackendEvent): void {
   const prev = eventChains.get(session.id) ?? Promise.resolve();
   const next = prev.then(() => processEvent(api, chatId, session, event)).catch((error) => {
     logger.error({ error, sessionId: session.id }, 'Event processing error');
   });
   eventChains.set(session.id, next);
 
-  // Clean up chain on terminal events to prevent memory leak
   if (event.type === 'result' || event.type === 'error') {
     next.then(() => eventChains.delete(session.id));
   }
 }
 
-async function processEvent(
-  api: Api,
-  chatId: number,
-  session: Session,
-  event: ClaudeEvent,
-): Promise<void> {
+// Backward-compatible name used by existing imports.
+export const routeClaudeEvent = routeBackendEvent;
+
+async function processEvent(api: Api, chatId: number, session: Session, event: BackendEvent): Promise<void> {
   const settings = sessionManager.getSettings(session.userId);
   const disableNotification = getNotificationSetting(event, settings);
 
-  // Check cross-session visibility
   if (!shouldShowMessage(session, settings)) {
     if (event.type === 'text_done' || event.type === 'result' || event.type === 'error') {
       let text = '';
       if (event.type === 'text_done') text = event.fullText;
-      else if (event.type === 'result') text = `Done. Cost: $${event.costUsd.toFixed(4)}`;
+      else if (event.type === 'result') text = 'Done.';
       else if (event.type === 'error') text = `Error: ${event.message}`;
 
       sessionManager.bufferMessage(session.id, {
@@ -112,15 +109,14 @@ async function processEvent(
 
   switch (event.type) {
     case 'init':
-      sessionManager.updateSessionClaudeId(session.id, event.sessionId);
+      sessionManager.updateSessionBackendId(session.id, event.sessionId);
       break;
 
     case 'text_delta': {
-      // Buffer text for history persistence (always)
       const buffer = assistantTextBuffers.get(session.id) ?? '';
       assistantTextBuffers.set(session.id, buffer + event.text);
+      sawTextDelta.add(session.id);
 
-      // Only stream in non-minimal mode
       if (settings.verbosity !== 'minimal') {
         let editor = streamingEditors.get(session.id);
         if (!editor) {
@@ -133,33 +129,53 @@ async function processEvent(
     }
 
     case 'text_done': {
-      // Get full text from buffer
-      const fullText = assistantTextBuffers.get(session.id) ?? event.fullText;
+      const buffered = assistantTextBuffers.get(session.id) ?? '';
+      const fullText = buffered || event.fullText;
       assistantTextBuffers.delete(session.id);
 
-      // Finalize streaming editor (non-minimal mode) or send single message (minimal mode)
-      const editor = streamingEditors.get(session.id);
-      if (editor) {
-        await editor.finalize(disableNotification);
-        streamingEditors.delete(session.id);
-      } else if (settings.verbosity === 'minimal' && fullText) {
-        // Minimal mode: send final text as single message
-        const { renderMarkdown } = await import('../telegram/renderer.js');
-        const rendered = postfixEmoji(renderMarkdown(fullText), session.emoji);
-        try {
-          await api.sendMessage(chatId, rendered, {
-            parse_mode: 'MarkdownV2',
-            disable_notification: disableNotification,
-          });
-        } catch {
-          // Fallback to plain text
-          await api.sendMessage(chatId, postfixEmoji(fullText, session.emoji), {
-            disable_notification: disableNotification,
-          });
+      if (session.backend === 'codex') {
+        const previous = codexTurnBuffer.get(session.id) ?? '';
+        const combined = previous ? `${previous}\n\n${fullText}` : fullText;
+        codexTurnBuffer.set(session.id, combined);
+        const plan = extractProposedPlan(combined);
+        if (plan) {
+          pendingPlanApprovals.add(session.id);
+          pendingPlanTexts.set(session.id, plan);
         }
       }
 
-      // Persist assistant turn to history
+      if (settings.verbosity === 'minimal') {
+        if (fullText) {
+          const { renderMarkdown } = await import('../telegram/renderer.js');
+          const rendered = postfixEmoji(renderMarkdown(fullText), session.emoji);
+          try {
+            await api.sendMessage(chatId, rendered, {
+              parse_mode: 'MarkdownV2',
+              disable_notification: disableNotification,
+            });
+          } catch {
+            await api.sendMessage(chatId, postfixEmoji(fullText, session.emoji), {
+              disable_notification: disableNotification,
+            });
+          }
+        }
+      } else {
+        let editor = streamingEditors.get(session.id);
+        if (!editor) {
+          editor = new StreamingEditor(api, chatId, session.emoji);
+          streamingEditors.set(session.id, editor);
+        }
+
+        if (!sawTextDelta.has(session.id) && fullText) {
+          await editor.appendText(fullText);
+        }
+
+        await editor.finalize(disableNotification);
+        streamingEditors.delete(session.id);
+      }
+
+      sawTextDelta.delete(session.id);
+
       if (fullText) {
         const turn = historyRepo.addAssistantTurn(session.id, fullText);
         currentAssistantTurns.set(session.id, turn.id);
@@ -168,7 +184,6 @@ async function processEvent(
     }
 
     case 'tool_use': {
-      // Track Write events targeting the plans directory
       if (event.toolName === 'Write' && typeof event.input['file_path'] === 'string') {
         const filePath = event.input['file_path'];
         if (filePath.includes('.claude/plans/')) {
@@ -176,10 +191,8 @@ async function processEvent(
         }
       }
 
-      // Track Write/Edit operations for file change summary
       if ((event.toolName === 'Write' || event.toolName === 'Edit') && typeof event.input['file_path'] === 'string') {
         const filePath = event.input['file_path'];
-        // Don't track plan files
         if (!filePath.includes('.claude/plans/')) {
           const ops = pendingFileOps.get(session.id) ?? [];
           if (event.toolName === 'Write' && typeof event.input['content'] === 'string') {
@@ -195,14 +208,12 @@ async function processEvent(
         }
       }
 
-      // Persist tool invocation to history
       const turnId = currentAssistantTurns.get(session.id) ?? null;
       const filePath = ['Write', 'Edit'].includes(event.toolName)
         ? (event.input['file_path'] as string | undefined)
         : undefined;
       historyRepo.addToolInvocation(session.id, turnId, event.toolName, event.input, filePath);
 
-      // Intercept ExitPlanMode — flag for plan approval on result
       if (event.toolName === 'ExitPlanMode') {
         pendingPlanApprovals.add(session.id);
         break;
@@ -218,36 +229,34 @@ async function processEvent(
       break;
     }
 
+    case 'tool_result':
+      break;
+
     case 'result': {
-      // Finalize streaming
       const resultEditor = streamingEditors.get(session.id);
       if (resultEditor) {
         await resultEditor.finalize(disableNotification);
         streamingEditors.delete(session.id);
       }
 
-      // Update turn cost in history
       const turnId = currentAssistantTurns.get(session.id);
       if (turnId) {
         historyRepo.updateTurnCost(turnId, event.costUsd);
         currentAssistantTurns.delete(session.id);
       }
 
-      // Clear text buffer
       assistantTextBuffers.delete(session.id);
 
       if (settings.verbosity !== 'minimal') {
-        const costStr = `$${event.costUsd.toFixed(4)}`;
         const durationStr = `${(event.durationMs / 1000).toFixed(1)}s`;
-        const summary = `✅ Done (${durationStr}, ${costStr}, ${event.numTurns} turns)`;
+        const summary = event.costUsd > 0
+          ? `✅ Done (${durationStr}, $${event.costUsd.toFixed(4)}, ${event.numTurns} turns)`
+          : `✅ Done (${durationStr}, ${event.numTurns} turns)`;
         await api.sendMessage(chatId, postfixEmoji(summary, session.emoji), {
           disable_notification: disableNotification,
         });
       }
 
-      sessionManager.updateSessionStatus(session.id, 'idle');
-
-      // Send file change summary if enabled
       const fileOps = pendingFileOps.get(session.id) ?? [];
       pendingFileOps.delete(session.id);
       if (settings.fileSharingMode !== 'off' && fileOps.length > 0) {
@@ -258,22 +267,25 @@ async function processEvent(
         }
       }
 
-      // Send plan approval document if ExitPlanMode was called
-      if (pendingPlanApprovals.has(session.id)) {
-        pendingPlanApprovals.delete(session.id);
-        await sendPlanApproval(api, chatId, session);
-      }
-
-      // Process next queued message
       const queue = getQueue(session.id);
       queue.setProcessing(false);
       queue.setCurrentTurnId(null);
-      await queue.processNext();
+
+      if (pendingPlanApprovals.has(session.id)) {
+        pendingPlanApprovals.delete(session.id);
+        sessionManager.updateSessionStatus(session.id, 'awaiting_input');
+        await sendPlanApproval(api, chatId, session);
+      } else {
+        sessionManager.updateSessionStatus(session.id, 'idle');
+        await queue.processNext();
+      }
+
+      sawTextDelta.delete(session.id);
+      codexTurnBuffer.delete(session.id);
       break;
     }
 
     case 'error': {
-      // Finalize streaming
       const errorEditor = streamingEditors.get(session.id);
       if (errorEditor) {
         await errorEditor.finalize(true);
@@ -284,12 +296,19 @@ async function processEvent(
         disable_notification: false,
       });
 
-      sessionManager.updateSessionStatus(session.id, 'idle');
+      sawTextDelta.delete(session.id);
+      codexTurnBuffer.delete(session.id);
+      pendingPlanApprovals.delete(session.id);
+      pendingPlanTexts.delete(session.id);
+      assistantTextBuffers.delete(session.id);
+      pendingFileOps.delete(session.id);
+      currentAssistantTurns.delete(session.id);
 
-      // Process next queued message
-      const errorQueue = getQueue(session.id);
-      errorQueue.setProcessing(false);
-      await errorQueue.processNext();
+      sessionManager.updateSessionStatus(session.id, 'idle');
+      const queue = getQueue(session.id);
+      queue.setProcessing(false);
+      queue.setCurrentTurnId(null);
+      await queue.processNext();
       break;
     }
 
@@ -304,18 +323,16 @@ async function processEvent(
 }
 
 async function findPlanFile(sessionId: string): Promise<string | null> {
-  // Primary: use tracked path from Write event
   const tracked = lastPlanFilePaths.get(sessionId);
   if (tracked) {
     try {
       await stat(tracked);
       return tracked;
     } catch {
-      // File doesn't exist, try fallback
+      // Fallback path search below.
     }
   }
 
-  // Fallback: glob plans directory for most recently modified .md file
   const plansDir = join(homedir(), '.claude', 'plans');
   try {
     const files = await readdir(plansDir);
@@ -343,30 +360,40 @@ async function findPlanFile(sessionId: string): Promise<string | null> {
 }
 
 async function sendPlanApproval(api: Api, chatId: number, session: Session): Promise<void> {
-  const keyboard = buildPlanApprovalKeyboard(session.id);
-  const planPath = await findPlanFile(session.id);
+  const keyboard = buildPlanApprovalKeyboard(session.id, session.backend);
+  const caption = postfixEmoji('📋 Plan ready for review', session.emoji);
 
-  // Clean up tracked path
-  lastPlanFilePaths.delete(session.id);
+  if (session.backend === 'codex') {
+    const planText = pendingPlanTexts.get(session.id);
+    pendingPlanTexts.delete(session.id);
 
-  if (planPath) {
-    try {
-      const content = await readFile(planPath, 'utf-8');
-      const filename = basename(planPath);
-      const caption = postfixEmoji('📋 Plan ready for review', session.emoji);
-
-      await api.sendDocument(chatId, new InputFile(Buffer.from(content), filename), {
+    if (planText) {
+      const filename = `proposed-plan-${Date.now()}.md`;
+      await api.sendDocument(chatId, new InputFile(Buffer.from(planText), filename), {
         caption,
         reply_markup: keyboard,
       });
       return;
-    } catch (error) {
-      logger.warn({ error, planPath, sessionId: session.id }, 'Failed to read plan file');
+    }
+  } else {
+    const planPath = await findPlanFile(session.id);
+    lastPlanFilePaths.delete(session.id);
+    pendingPlanTexts.delete(session.id);
+
+    if (planPath) {
+      try {
+        const content = await readFile(planPath, 'utf-8');
+        const filename = basename(planPath);
+        await api.sendDocument(chatId, new InputFile(Buffer.from(content), filename), {
+          caption,
+          reply_markup: keyboard,
+        });
+        return;
+      } catch (error) {
+        logger.warn({ error, planPath, sessionId: session.id }, 'Failed to read plan file');
+      }
     }
   }
 
-  // Fallback: no plan file found, send text with keyboard
-  await api.sendMessage(chatId, postfixEmoji('📋 Plan ready for review', session.emoji), {
-    reply_markup: keyboard,
-  });
+  await api.sendMessage(chatId, caption, { reply_markup: keyboard });
 }

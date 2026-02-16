@@ -1,6 +1,7 @@
 import type { BotContext } from '../bot.js';
 import * as sessionManager from '../core/session-manager.js';
 import { buildPermissionModeKeyboard } from '../telegram/keyboard-builder.js';
+import { isValidModeForBackend } from '../core/modes.js';
 
 export async function modeCommand(ctx: BotContext): Promise<void> {
   const userId = ctx.from?.id;
@@ -15,13 +16,13 @@ export async function modeCommand(ctx: BotContext): Promise<void> {
   const text = ctx.message?.text ?? '';
   const mode = text.replace(/^\/mode\s*/, '').trim();
 
-  if (mode && ['default', 'acceptEdits', 'plan', 'dontAsk'].includes(mode)) {
+  if (mode && isValidModeForBackend(session.backend, mode)) {
     sessionManager.updateSessionPermissionMode(session.id, mode);
     await ctx.reply(`${session.emoji} Permission mode set to: ${mode}`);
     return;
   }
 
-  const keyboard = buildPermissionModeKeyboard();
+  const keyboard = buildPermissionModeKeyboard(session.backend, session.permissionMode);
   await ctx.reply(`${session.emoji} Current mode: ${session.permissionMode}\nSelect permission mode:`, {
     reply_markup: keyboard,
   });

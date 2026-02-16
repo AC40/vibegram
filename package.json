@@ -1,7 +1,7 @@
 {
   "name": "vibegram",
   "version": "0.1.0",
-  "description": "Telegram bot for managing Claude Code sessions",
+  "description": "Telegram bot for managing Codex and Claude coding sessions",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {

@@ -23,6 +23,6 @@ export async function routeMessage(ctx: BotContext): Promise<void> {
     return;
   }
 
-  // Plain text → Claude
+  // Plain text → active backend
   await handleTextMessage(ctx, text);
 }

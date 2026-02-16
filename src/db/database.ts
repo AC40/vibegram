@@ -62,6 +62,8 @@ function runMigrations(db: Database.Database): void {
       cwd TEXT NOT NULL,
       emoji TEXT NOT NULL,
       claude_session_id TEXT,
+      backend TEXT NOT NULL DEFAULT 'claude',
+      backend_session_id TEXT,
       status TEXT NOT NULL DEFAULT 'idle',
       permission_mode TEXT NOT NULL DEFAULT 'default',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -74,8 +76,10 @@ function runMigrations(db: Database.Database): void {
       verbosity TEXT NOT NULL DEFAULT 'normal',
       notification_mode TEXT NOT NULL DEFAULT 'smart',
       cross_session_visibility TEXT NOT NULL DEFAULT 'show_all',
+      default_backend TEXT NOT NULL DEFAULT 'codex',
       default_permission_mode TEXT NOT NULL DEFAULT 'default',
-      file_sharing_mode TEXT NOT NULL DEFAULT 'auto'
+      file_sharing_mode TEXT NOT NULL DEFAULT 'auto',
+      default_codex_mode TEXT NOT NULL DEFAULT 'workspace-write'
     );
 
     CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
@@ -137,7 +141,27 @@ function runMigrations(db: Database.Database): void {
     // FTS tables/triggers may already exist
   }
 
+  addColumnIfMissing(db, 'sessions', 'backend', "TEXT NOT NULL DEFAULT 'claude'");
+  addColumnIfMissing(db, 'sessions', 'backend_session_id', 'TEXT');
+  db.exec(`UPDATE sessions SET backend_session_id = claude_session_id WHERE backend_session_id IS NULL AND claude_session_id IS NOT NULL`);
+
+  addColumnIfMissing(db, 'user_settings', 'default_backend', "TEXT NOT NULL DEFAULT 'codex'");
+  addColumnIfMissing(db, 'user_settings', 'default_codex_mode', "TEXT NOT NULL DEFAULT 'workspace-write'");
+
   logger.debug('Database migrations complete');
+}
+
+function addColumnIfMissing(
+  db: Database.Database,
+  table: string,
+  column: string,
+  definition: string,
+): void {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  const hasColumn = rows.some((row) => row.name === column);
+  if (!hasColumn) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
 }
 
 export function closeDatabase(): void {

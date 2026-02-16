@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { getDb } from './database.js';
-import type { Session, SessionStatus } from '../types/session.js';
-import { MAX_SESSIONS_PER_USER, SESSION_TIMEOUT_DAYS } from '../constants.js';
+import type { BackendType, Session, SessionStatus } from '../types/session.js';
+import { SESSION_TIMEOUT_DAYS } from '../constants.js';
 
 const ANIMAL_EMOJIS = ['🐙', '🦊', '🐺', '🦅', '🐋', '🦎', '🐆', '🦉', '🐬', '🦈', '🐢', '🦋'];
 
@@ -12,7 +12,11 @@ function rowToSession(row: Record<string, unknown>): Session {
     name: row['name'] as string,
     cwd: row['cwd'] as string,
     emoji: row['emoji'] as string,
-    claudeSessionId: (row['claude_session_id'] as string) ?? null,
+    backend: ((row['backend'] as BackendType | undefined) ?? 'claude'),
+    backendSessionId:
+      ((row['backend_session_id'] as string | undefined) ??
+      (row['claude_session_id'] as string | undefined) ??
+      null),
     status: row['status'] as SessionStatus,
     permissionMode: row['permission_mode'] as string,
     createdAt: row['created_at'] as string,
@@ -20,7 +24,13 @@ function rowToSession(row: Record<string, unknown>): Session {
   };
 }
 
-export function createSession(userId: number, name: string, cwd: string, permissionMode: string): Session {
+export function createSession(
+  userId: number,
+  name: string,
+  cwd: string,
+  backend: BackendType,
+  permissionMode: string,
+): Session {
   const db = getDb();
 
   // Use a transaction to prevent race condition on emoji assignment
@@ -34,9 +44,9 @@ export function createSession(userId: number, name: string, cwd: string, permiss
     const emoji = availableEmojis[Math.floor(Math.random() * availableEmojis.length)] ?? ANIMAL_EMOJIS[0]!;
 
     db.prepare(
-      `INSERT INTO sessions (id, user_id, name, cwd, emoji, permission_mode)
-       VALUES (?, ?, ?, ?, ?, ?)`
-    ).run(id, userId, name, cwd, emoji, permissionMode);
+      `INSERT INTO sessions (id, user_id, name, cwd, emoji, backend, permission_mode)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(id, userId, name, cwd, emoji, backend, permissionMode);
 
     return id;
   });
@@ -57,14 +67,21 @@ export function getSessionsByUserId(userId: number): Session[] {
   return rows.map(rowToSession);
 }
 
-export function updateSession(id: string, updates: Partial<Pick<Session, 'name' | 'cwd' | 'claudeSessionId' | 'status' | 'permissionMode'>>): void {
+export function updateSession(
+  id: string,
+  updates: Partial<Pick<Session, 'name' | 'cwd' | 'backend' | 'backendSessionId' | 'status' | 'permissionMode'>>,
+): void {
   const db = getDb();
   const fields: string[] = [];
   const values: unknown[] = [];
 
   if (updates.name !== undefined) { fields.push('name = ?'); values.push(updates.name); }
   if (updates.cwd !== undefined) { fields.push('cwd = ?'); values.push(updates.cwd); }
-  if (updates.claudeSessionId !== undefined) { fields.push('claude_session_id = ?'); values.push(updates.claudeSessionId); }
+  if (updates.backend !== undefined) { fields.push('backend = ?'); values.push(updates.backend); }
+  if (updates.backendSessionId !== undefined) {
+    fields.push('backend_session_id = ?');
+    values.push(updates.backendSessionId);
+  }
   if (updates.status !== undefined) { fields.push('status = ?'); values.push(updates.status); }
   if (updates.permissionMode !== undefined) { fields.push('permission_mode = ?'); values.push(updates.permissionMode); }
 
@@ -81,9 +98,11 @@ export function deleteSession(id: string): void {
   db.prepare('DELETE FROM sessions WHERE id = ?').run(id);
 }
 
-export function clearClaudeSession(id: string): void {
+export function clearBackendSession(id: string): void {
   const db = getDb();
-  db.prepare("UPDATE sessions SET claude_session_id = NULL, status = 'idle', last_active_at = datetime('now') WHERE id = ?").run(id);
+  db.prepare(
+    "UPDATE sessions SET claude_session_id = NULL, backend_session_id = NULL, status = 'idle', last_active_at = datetime('now') WHERE id = ?"
+  ).run(id);
 }
 
 export function getAllUserIds(): number[] {
@@ -91,6 +110,9 @@ export function getAllUserIds(): number[] {
   const rows = db.prepare('SELECT DISTINCT user_id FROM sessions').all() as { user_id: number }[];
   return rows.map(r => r.user_id);
 }
+
+// Backward compatibility for existing imports.
+export const clearClaudeSession = clearBackendSession;
 
 export function getSessionByEmoji(userId: number, emoji: string): Session | null {
   const db = getDb();

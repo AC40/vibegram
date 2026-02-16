@@ -14,7 +14,9 @@ export async function settingsCommand(ctx: BotContext): Promise<void> {
     `Notifications: ${settings.notificationMode}\n` +
     `Verbosity: ${settings.verbosity}\n` +
     `Cross-session: ${settings.crossSessionVisibility}\n` +
-    `Default mode: ${settings.defaultPermissionMode}`,
+    `Default backend: ${settings.defaultBackend}\n` +
+    `Default Claude mode: ${settings.defaultPermissionMode}\n` +
+    `Default Codex mode: ${settings.defaultCodexMode}`,
     { reply_markup: keyboard },
   );
 }

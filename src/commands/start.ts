@@ -10,13 +10,18 @@ export async function startCommand(ctx: BotContext): Promise<void> {
 
   if (sessions.length === 0) {
     const settings = sessionManager.getSettings(userId);
-    const session = sessionManager.createSession(userId, 'default', settings.defaultDirectory);
+    const session = sessionManager.createSession(
+      userId,
+      'default',
+      settings.defaultDirectory,
+      settings.defaultBackend,
+    );
 
     await ctx.reply(
       `Welcome to Vibegram! ${session.emoji}\n\n` +
-      `Created session "${session.name}" at ${session.cwd}\n\n` +
-      `Just type a message to talk to Claude, or use:\n` +
-      `/new [name] — Create a new session\n` +
+      `Created ${session.backend} session "${session.name}" at ${session.cwd}\n\n` +
+      `Just type a message to chat with your active backend, or use:\n` +
+      `/new [backend] [name] — Create a new session\n` +
       `/sessions — List all sessions\n` +
       `/cd — Change directory\n` +
       `/bothelp — Full command list\n` +
@@ -28,7 +33,7 @@ export async function startCommand(ctx: BotContext): Promise<void> {
     await ctx.reply(
       `Welcome back! You have ${sessions.length} session(s).\n` +
       `Active: ${active?.emoji} ${active?.name} (${active?.cwd})\n\n` +
-      `Type a message to talk to Claude.`
+      `Type a message to continue in ${active?.backend}.`
     );
   }
 }

@@ -1,4 +1,5 @@
 export type SessionStatus = 'idle' | 'processing' | 'awaiting_input';
+export type BackendType = 'claude' | 'codex';
 
 export interface Session {
   readonly id: string;
@@ -6,7 +7,8 @@ export interface Session {
   name: string;
   cwd: string;
   readonly emoji: string;
-  claudeSessionId: string | null;
+  backend: BackendType;
+  backendSessionId: string | null;
   status: SessionStatus;
   permissionMode: string;
   readonly createdAt: string;
@@ -24,8 +26,10 @@ export interface UserSettings {
   verbosity: Verbosity;
   notificationMode: NotificationMode;
   crossSessionVisibility: CrossSessionVisibility;
+  defaultBackend: BackendType;
   defaultPermissionMode: string;
   fileSharingMode: FileSharingMode;
+  defaultCodexMode: string;
 }
 
 export interface BufferedMessage {

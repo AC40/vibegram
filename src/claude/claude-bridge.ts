@@ -1,15 +1,10 @@
 import { EventEmitter } from 'events';
 import { spawn, type ChildProcess } from 'child_process';
 import { createInterface } from 'readline';
-import type { AIBackend } from '../types/agent.js';
-import type { ClaudeEvent, Attachment } from '../types/claude.js';
+import type { AIBackend, SendMessageOptions } from '../types/agent.js';
+import type { BackendEvent, Attachment } from '../types/claude.js';
+import { buildPromptWithAttachments } from '../core/attachment-prompt.js';
 import { logger } from '../utils/logger.js';
-
-export interface BridgeOptions {
-  readonly cwd?: string;
-  readonly permissionMode?: string;
-  readonly resume?: string;
-}
 
 interface SessionState {
   process: ChildProcess | null;
@@ -36,33 +31,30 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
     return state;
   }
 
-  async startSession(_options: { cwd: string; permissionMode: string }): Promise<string> {
+  async startSession(_options: { cwd: string; mode: string }): Promise<string> {
     const trackingId = crypto.randomUUID();
     this.getOrCreateState(trackingId);
     return trackingId;
   }
 
-  async sendMessage(sessionId: string, message: string, _attachments?: Attachment[]): Promise<void> {
-    await this.sendMessageWithOptions(sessionId, message, {});
+  async sendMessage(sessionId: string, message: string, attachments?: Attachment[]): Promise<void> {
+    await this.sendMessageWithOptions(sessionId, message, {}, attachments);
   }
 
-  async sendMessageWithOptions(
-    sessionId: string,
-    prompt: string,
-    options: BridgeOptions,
-  ): Promise<void> {
+  async sendMessageWithOptions(sessionId: string, prompt: string, options: SendMessageOptions, attachments?: Attachment[]): Promise<void> {
     const state = this.getOrCreateState(sessionId);
     if (state.processing) throw new Error('Session is already processing');
 
     state.processing = true;
 
     try {
+      const finalPrompt = buildPromptWithAttachments(prompt, attachments ?? []);
       const args = [
-        '-p', prompt,
+        '-p', finalPrompt,
         '--output-format', 'stream-json',
         '--verbose',
         '--include-partial-messages',
-        '--permission-mode', options.permissionMode ?? 'default',
+        '--permission-mode', options.mode ?? 'default',
         '--allowedTools', 'Read,Edit,Write,Bash,Glob,Grep,Task,WebFetch,WebSearch',
       ];
 
@@ -110,17 +102,17 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
           if (code !== 0 && code !== null) {
             const errMsg = stderrChunks.trim() || `claude CLI exited with code ${code}`;
             logger.error({ sessionId, code, stderr: stderrChunks }, 'Claude CLI error');
-            this.emit('event', sessionId, { type: 'error', message: errMsg } satisfies ClaudeEvent);
+            this.emit('event', sessionId, { type: 'error', message: errMsg } satisfies BackendEvent);
           } else if (signal) {
             // Process was killed by signal (SIGTERM, SIGKILL, etc.)
             const errMsg = `Claude process killed by ${signal}`;
             logger.error({ sessionId, signal }, 'Claude CLI killed');
-            this.emit('event', sessionId, { type: 'error', message: errMsg } satisfies ClaudeEvent);
+            this.emit('event', sessionId, { type: 'error', message: errMsg } satisfies BackendEvent);
           } else if (code === null && !signal) {
             // Process died unexpectedly without signal info
             const errMsg = 'Claude process terminated unexpectedly';
             logger.error({ sessionId }, 'Claude CLI terminated unexpectedly');
-            this.emit('event', sessionId, { type: 'error', message: errMsg } satisfies ClaudeEvent);
+            this.emit('event', sessionId, { type: 'error', message: errMsg } satisfies BackendEvent);
           }
 
           resolve();
@@ -133,7 +125,7 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
           this.emit('event', sessionId, {
             type: 'error',
             message: `Failed to spawn claude: ${error.message}`,
-          } satisfies ClaudeEvent);
+          } satisfies BackendEvent);
           resolve();
         });
       });
@@ -154,7 +146,7 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
             this.emit('event', sessionId, {
               type: 'init',
               sessionId: claudeSessionId,
-            } satisfies ClaudeEvent);
+            } satisfies BackendEvent);
           }
         }
         break;
@@ -180,7 +172,7 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
                 this.emit('event', sessionId, {
                   type: 'text_delta',
                   text: delta,
-                } satisfies ClaudeEvent);
+                } satisfies BackendEvent);
               }
             } else {
               // Final assistant message — skip if this text block was already finalized
@@ -192,12 +184,12 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
                 this.emit('event', sessionId, {
                   type: 'text_delta',
                   text: remaining,
-                } satisfies ClaudeEvent);
+                } satisfies BackendEvent);
               }
               this.emit('event', sessionId, {
                 type: 'text_done',
                 fullText,
-              } satisfies ClaudeEvent);
+              } satisfies BackendEvent);
               if (state) {
                 state.finalizedTexts.add(fullText);
                 state.lastTextLength = 0;
@@ -208,7 +200,7 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
               type: 'tool_use',
               toolName: block['name'] as string,
               input: (block['input'] ?? {}) as Record<string, unknown>,
-            } satisfies ClaudeEvent);
+            } satisfies BackendEvent);
           }
         }
         break;
@@ -223,13 +215,13 @@ export class ClaudeBridge extends EventEmitter implements AIBackend {
             costUsd: (msg['total_cost_usd'] as number) ?? 0,
             durationMs: (msg['duration_ms'] as number) ?? 0,
             numTurns: (msg['num_turns'] as number) ?? 0,
-          } satisfies ClaudeEvent);
+          } satisfies BackendEvent);
         } else {
           const errors = msg['errors'] as string[] | undefined;
           this.emit('event', sessionId, {
             type: 'error',
             message: `Query ended: ${subtype ?? 'unknown'}${errors ? ` - ${errors.join(', ')}` : ''}`,
-          } satisfies ClaudeEvent);
+          } satisfies BackendEvent);
         }
         break;
       }

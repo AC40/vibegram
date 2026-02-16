@@ -1,25 +1,32 @@
 import type { BotContext } from '../bot.js';
 import * as sessionManager from '../core/session-manager.js';
 import { getQueue } from '../core/message-queue.js';
+import { getBackendForSession } from '../core/backend-factory.js';
+import { isValidModeForBackend } from '../core/modes.js';
 import { browseDirectory } from '../telegram/directory-browser.js';
-import { buildNotificationKeyboard, buildVerbosityKeyboard, buildVisibilityKeyboard, buildPermissionModeKeyboard, buildSettingsKeyboard, buildHistoryPaginationKeyboard } from '../telegram/keyboard-builder.js';
-import { postfixEmoji } from '../telegram/renderer.js';
-import type { ClaudeBridge } from '../claude/claude-bridge.js';
+import {
+  buildNotificationKeyboard,
+  buildHistoryPaginationKeyboard,
+  buildPermissionModeKeyboard,
+  buildSettingsKeyboard,
+  buildVerbosityKeyboard,
+  buildVisibilityKeyboard,
+} from '../telegram/keyboard-builder.js';
 import { resolvePath } from '../telegram/path-registry.js';
 import { logger } from '../utils/logger.js';
-import type { CrossSessionVisibility, NotificationMode, Session, Verbosity } from '../types/session.js';
+import type { BackendType, CrossSessionVisibility, NotificationMode, Session, Verbosity } from '../types/session.js';
 import * as historyRepo from '../db/history-repository.js';
 import { formatHistoryPage, ITEMS_PER_PAGE } from '../commands/history.js';
 
-let claudeBridge: ClaudeBridge | null = null;
-let pendingNewSession: Map<number, string> = new Map(); // userId → sessionName
-
-export function setCallbackBridge(bridge: ClaudeBridge): void {
-  claudeBridge = bridge;
+interface PendingNewSession {
+  name: string;
+  backend: BackendType;
 }
 
-export function setPendingNewSession(userId: number, name: string): void {
-  pendingNewSession.set(userId, name);
+const pendingNewSession = new Map<number, PendingNewSession>(); // userId → new session state
+
+export function setPendingNewSession(userId: number, pending: PendingNewSession): void {
+  pendingNewSession.set(userId, pending);
 }
 
 export async function handleCallbackQuery(ctx: BotContext): Promise<void> {
@@ -37,43 +44,36 @@ export async function handleCallbackQuery(ctx: BotContext): Promise<void> {
       case 'switch':
         await handleSwitch(ctx, userId, payload);
         break;
-
       case 'delete':
         await handleDelete(ctx, userId, payload);
         break;
-
       case 'confirm':
         await handleConfirm(ctx, userId, rest);
         break;
-
-      case 'cd':
-        await handleCd(ctx, userId, payload);
+      case 'newbackend':
+        await handleNewBackend(ctx, userId, payload as BackendType);
         break;
-
+      case 'cd':
+        await handleCd(ctx, payload);
+        break;
       case 'sel':
         await handleSelectDir(ctx, userId, payload);
         break;
-
       case 'mode':
         await handleMode(ctx, userId, payload);
         break;
-
       case 'notify':
         await handleNotify(ctx, userId, payload);
         break;
-
       case 'verbosity':
         await handleVerbosity(ctx, userId, payload);
         break;
-
       case 'visibility':
         await handleVisibility(ctx, userId, payload);
         break;
-
       case 'settings':
         await handleSettingsMenu(ctx, userId, payload);
         break;
-
       case 'plan':
         await handlePlanAction(ctx, userId, rest);
         break;
@@ -81,11 +81,9 @@ export async function handleCallbackQuery(ctx: BotContext): Promise<void> {
       case 'history':
         await handleHistoryPagination(ctx, userId, rest);
         break;
-
       case 'cancel_action':
         await ctx.editMessageText('Cancelled.');
         break;
-
       default:
         logger.warn({ action, data }, 'Unknown callback action');
     }
@@ -98,9 +96,10 @@ export async function handleCallbackQuery(ctx: BotContext): Promise<void> {
 async function handleSwitch(ctx: BotContext, userId: number, sessionId: string): Promise<void> {
   const { session, buffered } = sessionManager.switchSession(userId, sessionId);
   await ctx.answerCallbackQuery({ text: `Switched to ${session.emoji} ${session.name}` });
-  await ctx.editMessageText(`Switched to ${session.emoji} ${session.name}\nDirectory: ${session.cwd}`);
+  await ctx.editMessageText(
+    `Switched to ${session.emoji} ${session.name} [${session.backend}]\nDirectory: ${session.cwd}`,
+  );
 
-  // Replay buffered messages
   if (buffered.length > 0) {
     await ctx.reply(`--- Replaying ${buffered.length} buffered messages from ${session.emoji} ${session.name} ---`);
     for (const msg of buffered) {
@@ -116,11 +115,9 @@ async function handleDelete(ctx: BotContext, userId: number, sessionId: string):
     return;
   }
 
-  if (claudeBridge) {
-    await claudeBridge.destroySession(session.id);
-  }
-
+  await getBackendForSession(session).destroySession(session.id);
   sessionManager.deleteSession(userId, sessionId);
+
   await ctx.answerCallbackQuery({ text: `Deleted ${session.emoji} ${session.name}` });
   await ctx.editMessageText(`Deleted ${session.emoji} ${session.name}`);
 }
@@ -132,7 +129,22 @@ async function handleConfirm(ctx: BotContext, userId: number, rest: string[]): P
   }
 }
 
-async function handleCd(ctx: BotContext, userId: number, idStr: string): Promise<void> {
+async function handleNewBackend(ctx: BotContext, userId: number, backend: BackendType): Promise<void> {
+  if (backend !== 'codex' && backend !== 'claude') {
+    await ctx.answerCallbackQuery({ text: 'Unknown backend' });
+    return;
+  }
+
+  const settings = sessionManager.getSettings(userId);
+  setPendingNewSession(userId, { name: '', backend });
+  const { keyboard, resolvedPath } = browseDirectory(settings.defaultDirectory);
+  await ctx.editMessageText(`📁 Select directory for new ${backend} session\n${resolvedPath}`, {
+    reply_markup: keyboard,
+  });
+  await ctx.answerCallbackQuery({ text: `Backend: ${backend}` });
+}
+
+async function handleCd(ctx: BotContext, idStr: string): Promise<void> {
   const path = resolvePath(Number(idStr));
   if (!path) {
     await ctx.answerCallbackQuery({ text: 'Path expired. Try again.' });
@@ -150,12 +162,11 @@ async function handleSelectDir(ctx: BotContext, userId: number, idStr: string): 
     return;
   }
 
-  // Check if this is for a new session
-  const pendingName = pendingNewSession.get(userId);
-  if (pendingName !== undefined) {
+  const pending = pendingNewSession.get(userId);
+  if (pending) {
     pendingNewSession.delete(userId);
 
-    let sessionName = pendingName;
+    let sessionName = pending.name;
     if (!sessionName) {
       const base = path.split('/').filter(Boolean).pop() ?? 'session';
       const existing = sessionManager.getSessions(userId);
@@ -167,15 +178,12 @@ async function handleSelectDir(ctx: BotContext, userId: number, idStr: string): 
       }
     }
 
-    const session = sessionManager.createSession(userId, sessionName, path);
-    await ctx.editMessageText(
-      `Created ${session.emoji} ${session.name}\nDirectory: ${path}`
-    );
+    const session = sessionManager.createSession(userId, sessionName, path, pending.backend);
+    await ctx.editMessageText(`Created ${session.emoji} ${session.name} [${session.backend}]\nDirectory: ${path}`);
     await ctx.answerCallbackQuery({ text: 'Session created!' });
     return;
   }
 
-  // Otherwise it's a /cd change
   const session = sessionManager.getActiveSession(userId);
   if (session) {
     sessionManager.updateSessionCwd(session.id, path);
@@ -186,10 +194,18 @@ async function handleSelectDir(ctx: BotContext, userId: number, idStr: string): 
 
 async function handleMode(ctx: BotContext, userId: number, mode: string): Promise<void> {
   const session = sessionManager.getActiveSession(userId);
-  if (session) {
-    sessionManager.updateSessionPermissionMode(session.id, mode);
-    await ctx.editMessageText(`Permission mode set to: ${mode} ${session.emoji}`);
+  if (!session) {
+    await ctx.answerCallbackQuery({ text: 'No active session' });
+    return;
   }
+
+  if (!isValidModeForBackend(session.backend, mode)) {
+    await ctx.answerCallbackQuery({ text: `Invalid mode for ${session.backend}` });
+    return;
+  }
+
+  sessionManager.updateSessionPermissionMode(session.id, mode);
+  await ctx.editMessageText(`Permission mode set to: ${mode} ${session.emoji}`);
   await ctx.answerCallbackQuery({ text: `Mode: ${mode}` });
 }
 
@@ -239,10 +255,16 @@ async function handleSettingsMenu(ctx: BotContext, userId: number, section: stri
         reply_markup: buildVisibilityKeyboard(settings.crossSessionVisibility),
       });
       break;
-    case 'mode':
-      await ctx.editMessageText('🔒 Permission mode:', {
-        reply_markup: buildPermissionModeKeyboard(),
+    case 'mode': {
+      const session = sessionManager.getActiveSession(userId);
+      const backend = session?.backend ?? 'codex';
+      await ctx.editMessageText(`🔒 Permission mode (${backend}):`, {
+        reply_markup: buildPermissionModeKeyboard(backend, session?.permissionMode),
       });
+      break;
+    }
+    default:
+      await ctx.editMessageText('Settings:', { reply_markup: buildSettingsKeyboard() });
       break;
   }
   await ctx.answerCallbackQuery();
@@ -258,35 +280,65 @@ async function handlePlanAction(ctx: BotContext, userId: number, rest: string[])
     return;
   }
 
+  if (session.backend === 'codex') {
+    await handleCodexPlanAction(ctx, session, action);
+    return;
+  }
+
+  await handleClaudePlanAction(ctx, session, action);
+}
+
+async function handleCodexPlanAction(ctx: BotContext, session: Session, action: string): Promise<void> {
   switch (action) {
-    case 'bypass': {
+    case 'approve':
+    case 'bypass':
+    case 'accept':
+      await updatePlanCaption(ctx, `✅ Plan approved ${session.emoji}`);
+      await ctx.answerCallbackQuery({ text: 'Plan approved' });
+      await resumeWithMessage(session, 'Plan approved. Proceed with implementation.');
+      break;
+    case 'changes':
+      await updatePlanCaption(ctx, `✏️ Send your feedback as a message ${session.emoji}`);
+      await ctx.answerCallbackQuery({ text: 'Type your feedback' });
+      break;
+    case 'abort':
+      await updatePlanCaption(ctx, `❌ Plan rejected ${session.emoji}`);
+      await ctx.answerCallbackQuery({ text: 'Plan aborted' });
+      await resumeWithMessage(session, 'Plan rejected. Stop and do not implement.');
+      break;
+    default:
+      logger.warn({ action }, 'Unknown Codex plan action');
+      break;
+  }
+}
+
+async function handleClaudePlanAction(ctx: BotContext, session: Session, action: string): Promise<void> {
+  switch (action) {
+    case 'bypass':
       sessionManager.updateSessionPermissionMode(session.id, 'dontAsk');
       await updatePlanCaption(ctx, `✅ Plan approved (bypass mode) ${session.emoji}`);
       await ctx.answerCallbackQuery({ text: 'Plan approved — bypass mode' });
       await resumeWithMessage(session, 'Plan approved. Proceed.');
       break;
-    }
-    case 'accept': {
+    case 'accept':
+    case 'approve':
       sessionManager.updateSessionPermissionMode(session.id, 'acceptEdits');
       await updatePlanCaption(ctx, `✅ Plan approved (accept edits) ${session.emoji}`);
       await ctx.answerCallbackQuery({ text: 'Plan approved — accept edits' });
       await resumeWithMessage(session, 'Plan approved. Proceed.');
       break;
-    }
-    case 'changes': {
+    case 'changes':
       await updatePlanCaption(ctx, `✏️ Send your feedback as a message ${session.emoji}`);
       await ctx.answerCallbackQuery({ text: 'Type your feedback' });
-      // User types feedback normally; it resumes via --resume in the text handler
       break;
-    }
-    case 'abort': {
+    case 'abort':
       await updatePlanCaption(ctx, `❌ Plan rejected ${session.emoji}`);
       await ctx.answerCallbackQuery({ text: 'Plan aborted' });
       await resumeWithMessage(session, 'Plan rejected. Do not implement.');
       break;
-    }
     default:
-      logger.warn({ action }, 'Unknown plan action');
+      logger.warn({ action }, 'Unknown Claude plan action');
+      break;
   }
 }
 
@@ -294,7 +346,6 @@ async function updatePlanCaption(ctx: BotContext, text: string): Promise<void> {
   try {
     await ctx.editMessageCaption({ caption: text });
   } catch {
-    // Message might be a text message (fallback case), not a document
     try {
       await ctx.editMessageText(text);
     } catch (error) {
@@ -328,12 +379,28 @@ async function handleHistoryPagination(ctx: BotContext, userId: number, rest: st
 }
 
 async function resumeWithMessage(session: Session, message: string): Promise<void> {
-  if (!claudeBridge) {
-    logger.error({ sessionId: session.id }, 'Cannot resume: bridge not initialized');
-    return;
-  }
-
   const queue = getQueue(session.id);
+
+  queue.setHandler(async (msg) => {
+    const latest = sessionManager.getSessionById(session.id);
+    if (!latest) {
+      queue.setProcessing(false);
+      return;
+    }
+
+    try {
+      const backend = getBackendForSession(latest);
+      await backend.sendMessageWithOptions(latest.id, msg.text, {
+        cwd: latest.cwd,
+        mode: latest.permissionMode,
+        resume: latest.backendSessionId ?? undefined,
+      });
+    } catch (error) {
+      logger.error({ error, sessionId: latest.id }, 'Failed to send queued plan message');
+      queue.setProcessing(false);
+      sessionManager.updateSessionStatus(latest.id, 'idle');
+    }
+  });
 
   if (queue.isProcessing) {
     queue.enqueue({ text: message, timestamp: Date.now() });
@@ -343,19 +410,12 @@ async function resumeWithMessage(session: Session, message: string): Promise<voi
   queue.setProcessing(true);
   sessionManager.updateSessionStatus(session.id, 'processing');
 
-  // Set up handler for queued follow-ups
-  queue.setHandler(async (msg) => {
-    await resumeWithMessage(
-      sessionManager.getSessions(session.userId).find((s) => s.id === session.id) ?? session,
-      msg.text,
-    );
-  });
-
   try {
-    await claudeBridge.sendMessageWithOptions(session.id, message, {
+    const backend = getBackendForSession(session);
+    await backend.sendMessageWithOptions(session.id, message, {
       cwd: session.cwd,
-      permissionMode: session.permissionMode,
-      resume: session.claudeSessionId ?? undefined,
+      mode: session.permissionMode,
+      resume: session.backendSessionId ?? undefined,
     });
   } catch (error) {
     logger.error({ error, sessionId: session.id }, 'Failed to resume session with plan action');

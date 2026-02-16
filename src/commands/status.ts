@@ -13,12 +13,13 @@ export async function statusCommand(ctx: BotContext): Promise<void> {
 
   const lines = [
     `${session.emoji} *${session.name}*`,
+    `Backend: ${session.backend}`,
     `Status: ${session.status}`,
     `Directory: ${session.cwd}`,
     `Mode: ${session.permissionMode}`,
     `Created: ${session.createdAt}`,
     `Last active: ${session.lastActiveAt}`,
-    `Claude session: ${session.claudeSessionId ? 'active' : 'none'}`,
+    `Conversation: ${session.backendSessionId ? 'active' : 'none'}`,
   ];
 
   await ctx.reply(lines.join('\n'));

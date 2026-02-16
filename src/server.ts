@@ -1,5 +1,6 @@
 import express from 'express';
 import type { Bot } from 'grammy';
+import type { BotContext } from './bot.js';
 import { config } from './config.js';
 import { logger } from './utils/logger.js';
 
@@ -9,7 +10,7 @@ let server: ReturnType<typeof express.application.listen> | null = null;
  * Start the HTTP server for webhook mode or health checks
  * Runs on the same port as VibeTunnel (4020 by default)
  */
-export async function startHttpServer(bot: Bot): Promise<void> {
+export async function startHttpServer(bot: Bot<BotContext>): Promise<void> {
   const app = express();
 
   // Health check endpoint (for systemd and ngrok)
